@@ -1,0 +1,86 @@
+# trackpoint-daemon-macos
+
+A lightweight macOS menu bar app that makes the ThinkPad TrackPoint Keyboard II work like it does on Windows.
+
+## Features
+
+- **Middle button scroll** — Hold middle button and move the TrackPoint to scroll
+- **Right Option → F18** — Remap Right Option to F18 for input source switching
+- **Left Opt ↔ Left Cmd swap** — Fix reversed modifier key layout on the Windows-designed keyboard
+- **Pointer sensitivity** — Adjustable via settings (BLE-compatible software scaling)
+- **Mouse acceleration disabled** — Linear pointer movement, no acceleration curve
+- **Auto-activate on connect** — All remaps apply when ThinkPad connects, revert on disconnect
+
+## Why F18?
+
+macOS uses a keyboard shortcut to switch input sources (e.g. English ↔ Korean). The Right Option key on the ThinkPad keyboard is inconvenient for this. By remapping it to F18, you can assign a clean, conflict-free shortcut:
+
+**System Settings → Keyboard → Keyboard Shortcuts → Input Sources → Select the previous input source → press F18**
+
+F18 is a safe choice because no app uses it by default.
+
+## Why Left Opt ↔ Left Cmd swap?
+
+The ThinkPad TrackPoint Keyboard II is designed for Windows, where the key order (left to right) is:
+
+```
+Ctrl  |  Win  |  Alt  |  Space  ...
+```
+
+On macOS the expected order is:
+
+```
+Ctrl  |  Option  |  Command  |  Space  ...
+```
+
+The physical keys are swapped compared to macOS convention. This setting corrects the layout so muscle memory from a MacBook keyboard works correctly.
+
+## Requirements
+
+- macOS 12+
+- ThinkPad TrackPoint Keyboard II (VID `0x17EF`)
+- Xcode Command Line Tools (`xcode-select --install`)
+
+## Install
+
+```bash
+git clone https://github.com/hoyaaaa/trackpoint-daemon-macos.git
+cd trackpoint-daemon-macos
+bash install.sh
+```
+
+Grant **Accessibility** permission when prompted:
+**System Settings → Privacy & Security → Accessibility → TrackPointD ✓**
+
+> If you recompile from source, the code signature changes and macOS invalidates the permission — you must re-grant it.
+
+## Uninstall
+
+```bash
+bash uninstall.sh
+```
+
+## Settings
+
+Click the menu bar icon (`TP+` when connected, `TP-` when not, `TP!` if accessibility not granted) → **Settings...**
+
+| Setting | Description |
+|---|---|
+| Right Option → F18 | Remap Right Option key to F18 |
+| Left Opt ↔ Left Cmd Swap | Fix modifier key order for macOS layout |
+| Pointer Sensitivity | 1 (slow) – 9 (fast), default 5. Applied in software, works over BLE. |
+
+## How it works
+
+| Feature | Mechanism |
+|---|---|
+| Middle button scroll | `CGEventTap` (annotated session level) |
+| Right Option → F18 | `CGEventTap` (HID level, no delay) |
+| Left Opt ↔ Left Cmd swap | `hidutil` kernel-level key remap |
+| Pointer sensitivity | `CGEventSetLocation` delta scaling (HID level) |
+| Acceleration removal | `IOHIDSetMouseAcceleration(-1.0)` |
+| Device detection | `IOHIDManager` matching Lenovo VID `0x17EF` |
+
+## License
+
+MIT © [hoyaaaa](https://github.com/hoyaaaa)
