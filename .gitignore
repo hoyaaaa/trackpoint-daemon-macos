@@ -1,0 +1,3 @@
+.omc/
+*.o
+trackpointd.c
