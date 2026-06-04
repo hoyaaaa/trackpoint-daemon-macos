@@ -522,13 +522,15 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
             return NULL;  /* consume move event during scroll */
         } else {
-            /* Sensitivity scaling */
+            /* Sensitivity + acceleration scaling */
             if (!s_tpCount) return event;
-            double factor = sensitivity_factor();
-            if (fabs(factor - 1.0) < 0.01) return event;
             double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
             double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
             if (dx == 0.0 && dy == 0.0) return event;
+            /* Windows-like sigmoid acceleration: 1.0x at rest, ~2.5x at high speed */
+            double speed = sqrt(dx * dx + dy * dy);
+            double accel = 1.0 + 1.5 * (1.0 - exp(-speed / 3.0));
+            double factor = sensitivity_factor() * accel;
             double newDx = dx * factor;
             double newDy = dy * factor;
             CGPoint pos = CGEventGetLocation(event);
