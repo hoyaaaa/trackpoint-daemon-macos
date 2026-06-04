@@ -375,6 +375,13 @@ static AppDelegate *g_app = nil;
     g_app = self;
     g_settings = [SettingsWindowController new];
     [self buildMenu];
+    /* Request Input Monitoring permission (needed for IOHIDQueue per-device filtering) */
+    if (!CGPreflightListenEventAccess()) {
+        CGRequestListenEventAccess();
+        LOG("Input Monitoring permission requested");
+    } else {
+        LOG("Input Monitoring: already granted");
+    }
     [self refresh];
     s_displayBounds = CGDisplayBounds(CGMainDisplayID());
     /* key absent = macOS default = natural scroll ON */
@@ -738,7 +745,10 @@ static void try_create_event_tap(void) {
    ══════════════════════════════════════════════════════════════ */
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
-    IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
+    IOReturn openRet = IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
+    LOG("IOHIDDeviceOpen: 0x%08X (%s)", openRet,
+        openRet == kIOReturnSuccess ? "ok" :
+        openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
     s_tpCount++;
 
     /* Build X/Y element queue for this device.
@@ -786,8 +796,8 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
             tryBuildQueue();
         } else {
             /* BLE not yet enumerated — retry in 500ms */
-            LOG("HID device: 0 elements at connect — will retry in 500ms");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+            LOG("HID device: 0 elements at connect — will retry in 2s");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), tryBuildQueue);
         }
     }
