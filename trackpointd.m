@@ -2,9 +2,10 @@
  * trackpointd.m — ThinkPad TrackPoint macOS menu bar app
  *
  * Key remap: hidutil (kernel level) — Left Opt <-> Left Cmd swap
- *            CGEventTap (HID level) — Right Option -> F18
- * Scroll:    CGEventTap (mouse tap only)
- * Sensitivity: CGEventTap delta scaling (HID level, BLE-compatible)
+ * Unified CGEventTap at kCGHIDEventTap:
+ *   - Right Option → F18
+ *   - Middle button → scroll (with accumulator + threshold)
+ *   - Pointer sensitivity delta scaling (BLE-compatible)
  * Detection: IOHIDManager (ThinkPad BLE connect/disconnect)
  *
  * Compile:
@@ -36,10 +37,7 @@
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
-static CFMachPortRef     s_tap        = NULL;   /* middle-btn scroll */
-static CFMachPortRef     s_kbd_tap    = NULL;   /* Right Opt -> F18  */
-static CFMachPortRef     s_scale_tap  = NULL;   /* delta scaling     */
-static CFRunLoopTimerRef s_retryTimer = NULL;
+static CFMachPortRef     s_tap        = NULL;   /* unified event tap */
 static int               s_tpCount    = 0;
 static bool              s_middleDown = false;
 static bool              s_hasMoved   = false;
@@ -434,220 +432,146 @@ static void disable_acceleration(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   CGEventTap 1: sensitivity delta scaling (kCGHIDEventTap)
-   Only active when ThinkPad connected. Scales pointer movement
-   by exp((sensitivity-5)*0.25): 1->0.37x, 5->1.0x, 9->2.72x
+   Unified CGEventTap at kCGHIDEventTap
+   Handles: Right Option→F18, middle-button scroll, sensitivity scaling
    ══════════════════════════════════════════════════════════════ */
-static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
-                                  CGEventRef event, void *refcon) {
+static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
+                                    CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
+
+    /* Re-enable if disabled by system */
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        LOG("scale tap re-enabled (was disabled by %s)",
-            type == kCGEventTapDisabledByTimeout ? "timeout" : "user");
-        if (s_scale_tap) CGEventTapEnable(s_scale_tap, true);
-        return event;
-    }
-    if (!s_tpCount) return event;
-    /* Safety net: catch OtherMouseUp at kCGHIDEventTap level — even if mouse_callback's
-       tap was disabled at the moment of release, we always reset s_middleDown here. */
-    if (type == kCGEventOtherMouseUp) {
-        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
-        if (btn == 2) {
-            if (s_middleDown) LOG("scale_tap: middle UP safety reset");
-            s_middleDown = false;
-            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-        }
-        return event;
-    }
-    if (s_middleDown) return event;
-
-    double factor = sensitivity_factor();
-    if (fabs(factor - 1.0) < 0.01) return event;
-
-    double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
-    double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
-    if (dx == 0.0 && dy == 0.0) return event;
-
-    /* Scale the deltas */
-    double newDx = dx * factor;
-    double newDy = dy * factor;
-
-    /* Shift the event's cursor position by the extra delta.
-       CGEventSetLocation is what actually moves the cursor. */
-    CGPoint pos = CGEventGetLocation(event);
-    CGPoint newPos = { pos.x + (newDx - dx), pos.y + (newDy - dy) };
-
-    /* Clamp to main display bounds (cached) */
-    CGRect bounds = s_displayBounds;
-    newPos.x = MAX(bounds.origin.x, MIN(bounds.origin.x + bounds.size.width  - 1, newPos.x));
-    newPos.y = MAX(bounds.origin.y, MIN(bounds.origin.y + bounds.size.height - 1, newPos.y));
-
-    CGEventSetLocation(event, newPos);
-    CGEventSetDoubleValueField(event, kCGMouseEventDeltaX, newDx);
-    CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, newDy);
-    return event;
-}
-
-/* ══════════════════════════════════════════════════════════════
-   CGEventTap 2: Right Option -> F18 (kCGHIDEventTap)
-   ══════════════════════════════════════════════════════════════ */
-static CGEventRef kbd_callback(CGEventTapProxy proxy, CGEventType type,
-                                CGEventRef event, void *refcon) {
-    (void)proxy; (void)refcon;
-    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        if (s_kbd_tap) CGEventTapEnable(s_kbd_tap, true);
-        return event;
-    }
-    if (type != kCGEventFlagsChanged) return event;
-    if (!s_f18Enabled) return event;
-
-    int64_t kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
-    if (kc != 0x3D) return event;
-
-    CGEventFlags flags = CGEventGetFlags(event);
-    bool down = (flags & kCGEventFlagMaskAlternate) != 0;
-    CGEventSetFlags(event, flags & ~kCGEventFlagMaskAlternate);
-
-    CGEventRef f18 = CGEventCreateKeyboardEvent(NULL, 0x4F, down);
-    CGEventPost(kCGHIDEventTap, f18);
-    CFRelease(f18);
-    return NULL;
-}
-
-/* ══════════════════════════════════════════════════════════════
-   CGEventTap 3: Middle button -> scroll (kCGAnnotatedSessionEventTap)
-   ══════════════════════════════════════════════════════════════ */
-static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
-                                  CGEventRef event, void *refcon) {
-    (void)proxy; (void)refcon;
-    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        LOG("mouse tap re-enabled (was disabled by %s)",
+        LOG("tap re-enabled (disabled by %s)",
             type == kCGEventTapDisabledByTimeout ? "timeout" : "user");
         if (s_tap) CGEventTapEnable(s_tap, true);
         return event;
     }
-    int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
 
-    if (type == kCGEventOtherMouseDown && btn == 2) {
-        if (!s_tpCount) return event;
-        LOG("middle DOWN");
-        s_middleDown = true; s_hasMoved = false;
-        s_lastPos = CGEventGetLocation(event);
-        return NULL;
+    /* ── Right Option → F18 ────────────────────────────────── */
+    if (type == kCGEventFlagsChanged && s_f18Enabled) {
+        int64_t kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        if (kc == 0x3D) {  /* Right Option */
+            CGEventFlags flags = CGEventGetFlags(event);
+            bool down = (flags & kCGEventFlagMaskAlternate) != 0;
+            CGEventSetFlags(event, flags & ~kCGEventFlagMaskAlternate);
+            CGEventRef f18 = CGEventCreateKeyboardEvent(NULL, 0x4F, down);
+            CGEventPost(kCGHIDEventTap, f18);
+            CFRelease(f18);
+            return NULL;
+        }
     }
-    if (type == kCGEventOtherMouseUp && btn == 2) {
-        LOG("middle UP (moved=%s)", s_hasMoved ? "yes" : "no");
-        s_middleDown = false;
-        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-        if (!s_hasMoved) {
+
+    /* ── Middle button: down ───────────────────────────────── */
+    if (type == kCGEventOtherMouseDown) {
+        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+        if (btn == 2 && s_tpCount > 0) {
+            LOG("middle DOWN");
+            s_middleDown = true;
+            s_hasMoved = false;
+            s_lastPos = CGEventGetLocation(event);
+            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+            return NULL;
+        }
+    }
+
+    /* ── Middle button: up ─────────────────────────────────── */
+    if (type == kCGEventOtherMouseUp) {
+        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+        if (btn == 2) {
+            LOG("middle UP (moved=%s)", s_hasMoved ? "yes" : "no");
+            s_middleDown = false;
+            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+            if (!s_hasMoved) {
+                /* Tap = click: re-inject middle click */
+                CGPoint p = CGEventGetLocation(event);
+                CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown, p, kCGMouseButtonCenter);
+                CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseUp,   p, kCGMouseButtonCenter);
+                CGEventPost(kCGHIDEventTap, dn);
+                CGEventPost(kCGHIDEventTap, up);
+                CFRelease(dn); CFRelease(up);
+            }
+            return NULL;
+        }
+    }
+
+    /* ── Mouse move / drag ─────────────────────────────────── */
+    if (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged) {
+        if (s_middleDown) {
+            /* Scroll mode */
             CGPoint p = CGEventGetLocation(event);
-            CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown, p, kCGMouseButtonCenter);
-            CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseUp,   p, kCGMouseButtonCenter);
-            CGEventPost(kCGSessionEventTap, dn);
-            CGEventPost(kCGSessionEventTap, up);
-            CFRelease(dn); CFRelease(up);
+            double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
+            LOG("scroll move dx=%.1f dy=%.1f accum=(%.1f,%.1f)", dx, dy, s_scrollAccumX+dx, s_scrollAccumY+dy);
+            s_lastPos = p;
+            s_scrollAccumX += dx;
+            s_scrollAccumY += dy;
+            double adx = fabs(s_scrollAccumX), ady = fabs(s_scrollAccumY);
+            if (adx > SCROLL_THRESHOLD || ady > SCROLL_THRESHOLD) {
+                s_hasMoved = true;
+                double vx = copysign(pow(adx, 1.4) * s_scrollSpeed, s_scrollAccumX);
+                double vy = copysign(pow(ady, 1.4) * s_scrollSpeed, s_scrollAccumY);
+                int sign = s_naturalScroll ? 1 : -1;
+                CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
+                    (int32_t)round(vy * sign),
+                    (int32_t)round(vx * sign));
+                LOG("scroll fired dy=%d dx=%d", (int32_t)round(vy*sign), (int32_t)round(vx*sign));
+                CGEventPost(kCGHIDEventTap, sc);
+                CFRelease(sc);
+                s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+            }
+            return NULL;  /* consume move event during scroll */
+        } else {
+            /* Sensitivity scaling */
+            if (!s_tpCount) return event;
+            double factor = sensitivity_factor();
+            if (fabs(factor - 1.0) < 0.01) return event;
+            double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
+            double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
+            if (dx == 0.0 && dy == 0.0) return event;
+            double newDx = dx * factor;
+            double newDy = dy * factor;
+            CGPoint pos = CGEventGetLocation(event);
+            CGPoint newPos = { pos.x + (newDx - dx), pos.y + (newDy - dy) };
+            CGRect bounds = s_displayBounds;
+            newPos.x = MAX(bounds.origin.x, MIN(bounds.origin.x + bounds.size.width  - 1, newPos.x));
+            newPos.y = MAX(bounds.origin.y, MIN(bounds.origin.y + bounds.size.height - 1, newPos.y));
+            CGEventSetLocation(event, newPos);
+            CGEventSetDoubleValueField(event, kCGMouseEventDeltaX, newDx);
+            CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, newDy);
+            return event;
         }
-        return NULL;
     }
-    if (s_middleDown && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
-        CGPoint p = CGEventGetLocation(event);
-        double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
-        s_lastPos = p;
-        s_scrollAccumX += dx;
-        s_scrollAccumY += dy;
-        double adx = fabs(s_scrollAccumX), ady = fabs(s_scrollAccumY);
-        if (adx > SCROLL_THRESHOLD || ady > SCROLL_THRESHOLD) {
-            s_hasMoved = true;
-            double vx = copysign(pow(adx, 1.4) * s_scrollSpeed, s_scrollAccumX);
-            double vy = copysign(pow(ady, 1.4) * s_scrollSpeed, s_scrollAccumY);
-            int sign = s_naturalScroll ? 1 : -1;
-            CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
-                (int32_t)round(vy * sign),
-                (int32_t)round(vx * sign));
-            LOG("scroll dy=%d dx=%d", (int32_t)round(vy * sign), (int32_t)round(vx * sign));
-            CGEventPost(kCGSessionEventTap, sc);
-            CFRelease(sc);
-            s_scrollAccumX = 0.0;
-            s_scrollAccumY = 0.0;
-        }
-        return NULL;
-    }
+
     return event;
 }
 
 static void set_tap_enabled(bool enabled) {
     if (s_tap) CGEventTapEnable(s_tap, enabled);
-    LOG("ThinkPad %s — scroll %s", enabled ? "connected" : "disconnected", enabled ? "ON" : "OFF");
+    LOG("ThinkPad %s — tap %s", enabled ? "connected" : "disconnected", enabled ? "ON" : "OFF");
     apply_key_remap();
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
-static void tap_retry(CFRunLoopTimerRef timer, void *info) {
-    (void)info;
-    if (s_tap) { CFRunLoopTimerInvalidate(timer); s_retryTimer = NULL; return; }
-    try_create_event_tap();
-}
-
 static void try_create_event_tap(void) {
-    /* ── Scale tap: kCGHIDEventTap (mouse delta scaling) ── */
-    if (!s_scale_tap) {
-        CGEventMask scaleMask = CGEventMaskBit(kCGEventMouseMoved) |
-                                CGEventMaskBit(kCGEventOtherMouseDragged) |
-                                CGEventMaskBit(kCGEventOtherMouseUp);
-        s_scale_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
-                                        kCGEventTapOptionDefault,
-                                        scaleMask, scale_callback, NULL);
-        if (s_scale_tap) {
-            CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, s_scale_tap, 0);
-            CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes);
-            CGEventTapEnable(s_scale_tap, true);
-            LOG("scale tap ON");
-        } else {
-            LOG("scale tap failed — accessibility permission required");
-        }
-    }
-
-    /* ── Keyboard tap: kCGHIDEventTap (Right Option -> F18) ── */
-    if (!s_kbd_tap) {
-        s_kbd_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
-                                      kCGEventTapOptionDefault,
-                                      CGEventMaskBit(kCGEventFlagsChanged),
-                                      kbd_callback, NULL);
-        if (s_kbd_tap) {
-            CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, s_kbd_tap, 0);
-            CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes);
-            CGEventTapEnable(s_kbd_tap, true);
-            LOG("keyboard tap ON");
-        } else {
-            LOG("keyboard tap failed — accessibility permission required");
-        }
-    }
-
-    /* ── Mouse tap: kCGAnnotatedSessionEventTap (middle btn scroll) ── */
     if (s_tap) return;
+
     CGEventMask mask =
+        CGEventMaskBit(kCGEventFlagsChanged)      |
         CGEventMaskBit(kCGEventOtherMouseDown)    |
         CGEventMaskBit(kCGEventOtherMouseUp)      |
         CGEventMaskBit(kCGEventMouseMoved)        |
         CGEventMaskBit(kCGEventOtherMouseDragged);
 
-    s_tap = CGEventTapCreate(kCGAnnotatedSessionEventTap, kCGHeadInsertEventTap,
-                              kCGEventTapOptionDefault, mask, mouse_callback, NULL);
+    s_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
+                              kCGEventTapOptionDefault, mask,
+                              unified_callback, NULL);
     if (!s_tap) {
-        LOG("mouse tap failed — accessibility permission required");
-        if (!s_retryTimer) {
-            CFRunLoopTimerContext ctx = {0};
-            s_retryTimer = CFRunLoopTimerCreate(kCFAllocatorDefault,
-                CFAbsoluteTimeGetCurrent() + 5.0, 5.0, 0, 0, tap_retry, &ctx);
-            CFRunLoopAddTimer(CFRunLoopGetMain(), s_retryTimer, kCFRunLoopDefaultMode);
-        }
+        LOG("unified tap failed — accessibility permission required");
         return;
     }
-    if (s_retryTimer) { CFRunLoopTimerInvalidate(s_retryTimer); s_retryTimer = NULL; }
     CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, s_tap, 0);
     CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes);
     CGEventTapEnable(s_tap, true);
-    LOG("mouse tap ON");
+    LOG("unified tap ON (kCGHIDEventTap)");
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
