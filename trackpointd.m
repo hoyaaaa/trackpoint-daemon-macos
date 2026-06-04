@@ -625,7 +625,21 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                     LOG("HID queue confirmed working — per-device filtering active");
                 }
                 if (s_tp_queue_ok && !has_fresh) {
-                    return event;  /* no fresh ThinkPad values → other device */
+                    static CFAbsoluteTime s_last_other_log = 0;
+                    CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
+                    if (now2 - s_last_other_log > 1.0) {
+                        LOG("other device — filtered (queue empty)");
+                        s_last_other_log = now2;
+                    }
+                    return event;
+                }
+                if (s_tp_queue_ok && has_fresh) {
+                    static CFAbsoluteTime s_last_tp_log = 0;
+                    CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
+                    if (now2 - s_last_tp_log > 1.0) {
+                        LOG("ThinkPad move — processing");
+                        s_last_tp_log = now2;
+                    }
                 }
             }
 
@@ -727,31 +741,54 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
     s_tpCount++;
 
-    /* Try to build X/Y queue on any ThinkPad device that exposes mouse axes */
+    /* Build X/Y element queue for this device.
+     * BLE devices may not have elements ready immediately — retry after 500ms if needed. */
     if (!s_tp_queue) {
-        IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, dev, 64, kIOHIDOptionsTypeNone);
-        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
-        int added = 0;
-        if (elems) {
-            for (CFIndex i = 0; i < CFArrayGetCount(elems); i++) {
-                IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
-                uint32_t ePage  = IOHIDElementGetUsagePage(elem);
-                uint32_t eUsage = IOHIDElementGetUsage(elem);
-                if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) { /* X=0x30, Y=0x31 */
-                    IOHIDQueueAddElement(queue, elem);
-                    added++;
-                    LOG("HID queue: added usagePage=%d usage=0x%02X", ePage, eUsage);
+        IOHIDDeviceRef devRetained = (IOHIDDeviceRef)CFRetain(dev);
+        void (^tryBuildQueue)(void) = ^{
+            if (s_tp_queue) { CFRelease(devRetained); return; }
+            CFArrayRef elems = IOHIDDeviceCopyMatchingElements(devRetained, NULL, kIOHIDOptionsTypeNone);
+            int total = elems ? (int)CFArrayGetCount(elems) : 0;
+            LOG("HID device: %d elements (queue build attempt)", total);
+            int added = 0;
+            if (total > 0) {
+                IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, devRetained, 64, kIOHIDOptionsTypeNone);
+                if (queue) {
+                    for (CFIndex i = 0; i < total; i++) {
+                        IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
+                        uint32_t ePage  = IOHIDElementGetUsagePage(elem);
+                        uint32_t eUsage = IOHIDElementGetUsage(elem);
+                        if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) {
+                            IOHIDQueueAddElement(queue, elem);
+                            added++;
+                        }
+                    }
+                    if (added > 0) {
+                        IOHIDQueueStart(queue);
+                        s_tp_queue = queue;
+                        LOG("HID queue created with %d X/Y elements", added);
+                    } else {
+                        CFRelease(queue);
+                        LOG("HID queue: no X/Y elements on this device");
+                    }
                 }
             }
-            CFRelease(elems);
-        }
-        if (added > 0) {
-            IOHIDQueueStart(queue);
-            s_tp_queue = queue;
-            LOG("HID queue created with %d X/Y elements", added);
+            if (elems) CFRelease(elems);
+            CFRelease(devRetained);
+        };
+
+        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
+        int total = elems ? (int)CFArrayGetCount(elems) : 0;
+        if (elems) CFRelease(elems);
+
+        if (total > 0) {
+            /* Elements ready now — build immediately */
+            tryBuildQueue();
         } else {
-            if (queue) CFRelease(queue);
-            LOG("HID queue: no X/Y elements on this device (trying next)");
+            /* BLE not yet enumerated — retry in 500ms */
+            LOG("HID device: 0 elements at connect — will retry in 500ms");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), tryBuildQueue);
         }
     }
 
