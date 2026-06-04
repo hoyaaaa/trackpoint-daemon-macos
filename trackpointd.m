@@ -326,8 +326,10 @@ static AppDelegate *g_app = nil;
     [self buildMenu];
     [self refresh];
     s_displayBounds = CGDisplayBounds(CGMainDisplayID());
-    s_naturalScroll = [[NSUserDefaults standardUserDefaults]
-        boolForKey:@"com.apple.swipescrolldirection"];
+    /* key absent = macOS default = natural scroll ON */
+    NSNumber *scrollPref = [[NSUserDefaults standardUserDefaults]
+        objectForKey:@"com.apple.swipescrolldirection"];
+    s_naturalScroll = (scrollPref == nil) ? true : [scrollPref boolValue];
     disable_acceleration();
     setup_hid();
     try_create_event_tap();
@@ -509,7 +511,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                 s_hasMoved = true;
                 double vx = copysign(pow(adx, 1.4) * s_scrollSpeed, s_scrollAccumX);
                 double vy = copysign(pow(ady, 1.4) * s_scrollSpeed, s_scrollAccumY);
-                int sign = s_naturalScroll ? 1 : -1;
+                int sign = s_naturalScroll ? -1 : 1;
                 CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
                     (int32_t)round(vy * sign),
                     (int32_t)round(vx * sign));
