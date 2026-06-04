@@ -34,6 +34,12 @@
 #define PREF_F18          @"tpF18Enabled"
 #define PREF_SWAP         @"tpSwapEnabled"
 #define PREF_SCROLL_SPEED @"tpScrollSpeed"
+#define PREF_PTS          @"tpPtsEnabled"
+
+/* Press-to-select thresholds */
+#define PTS_MAX_DURATION  0.25  /* max tap duration (seconds) */
+#define PTS_MAX_DIST      20.0  /* max accumulated displacement (pixels) */
+#define PTS_STOP_DELAY    0.06  /* idle time after last move = stick stopped */
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
@@ -51,6 +57,14 @@ static bool    s_naturalScroll = false;
 static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
 static CGRect  s_displayBounds;
+
+/* Press-to-select state */
+static bool              s_ptsEnabled   = false;
+static bool              s_pts_tracking = false;
+static double            s_pts_totalDist = 0;
+static CFAbsoluteTime    s_pts_startTime = 0;
+static CGPoint           s_pts_pos       = {0, 0};
+static CFRunLoopTimerRef s_pts_timer     = NULL;
 
 /* sensitivity 1-9 -> scale factor via exponential curve
    1 -> ~0.37x, 5 -> 1.0x, 9 -> ~2.72x */
@@ -71,6 +85,7 @@ static void apply_key_remap(void);
 @property (strong) NSTextField *accessStatus;
 @property (strong) NSButton    *f18Check;
 @property (strong) NSButton    *swapCheck;
+@property (strong) NSButton    *ptsCheck;
 @property (strong) NSSlider    *slider;
 @property (strong) NSTextField *valueLabel;
 @property (strong) NSSlider    *scrollSlider;
@@ -85,7 +100,7 @@ static SettingsWindowController *g_settings = nil;
 
 - (instancetype)init {
     NSWindow *win = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 360, 390)
+        initWithContentRect:NSMakeRect(0, 0, 360, 470)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -100,7 +115,7 @@ static SettingsWindowController *g_settings = nil;
 - (void)buildUI {
     NSView *cv = self.window.contentView;
     CGFloat W = 360, pad = 20;
-    CGFloat y = 350;
+    CGFloat y = 430;
 
     /* ── Status ── */
     NSTextField *sh = [NSTextField labelWithString:@"Status"];
@@ -243,6 +258,25 @@ static SettingsWindowController *g_settings = nil;
     self.scrollValueLabel.alignment = NSTextAlignmentCenter;
     self.scrollValueLabel.frame = NSMakeRect(0, y, W, 16);
     [cv addSubview:self.scrollValueLabel];
+    y -= 16;
+
+    /* ── Separator ── */
+    NSBox *sep4 = [[NSBox alloc] initWithFrame:NSMakeRect(pad, y, W - pad*2, 1)];
+    sep4.boxType = NSBoxSeparator;
+    [cv addSubview:sep4];
+    y -= 18;
+
+    /* ── TrackPoint ── */
+    NSTextField *tph = [NSTextField labelWithString:@"TrackPoint"];
+    tph.font = [NSFont boldSystemFontOfSize:12];
+    tph.frame = NSMakeRect(pad, y, W - pad*2, 18);
+    [cv addSubview:tph];
+    y -= 26;
+
+    self.ptsCheck = [NSButton checkboxWithTitle:@"Press-to-Select (tap stick → left click)"
+                     target:self action:@selector(togglePts:)];
+    self.ptsCheck.frame = NSMakeRect(pad + 8, y, W - pad*2 - 8, 20);
+    [cv addSubview:self.ptsCheck];
 
     [self syncState];
 }
@@ -262,6 +296,7 @@ static SettingsWindowController *g_settings = nil;
 
     self.f18Check.state  = s_f18Enabled  ? NSControlStateValueOn : NSControlStateValueOff;
     self.swapCheck.state = s_swapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.ptsCheck.state  = s_ptsEnabled  ? NSControlStateValueOn : NSControlStateValueOff;
 
     self.slider.integerValue = s_sensitivity;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", s_sensitivity];
@@ -297,6 +332,16 @@ static SettingsWindowController *g_settings = nil;
     [[NSUserDefaults standardUserDefaults] setBool:s_swapEnabled forKey:PREF_SWAP];
     apply_key_remap();
     LOG("Left Opt<->Cmd swap: %s", s_swapEnabled ? "ON" : "OFF");
+}
+
+- (void)togglePts:(NSButton *)btn {
+    s_ptsEnabled = (btn.state == NSControlStateValueOn);
+    [[NSUserDefaults standardUserDefaults] setBool:s_ptsEnabled forKey:PREF_PTS];
+    if (!s_ptsEnabled && s_pts_timer) {
+        CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL;
+        s_pts_tracking = false;
+    }
+    LOG("press-to-select: %s", s_ptsEnabled ? "ON" : "OFF");
 }
 
 - (void)openAccessibility:(id)sender {
@@ -435,6 +480,23 @@ static void disable_acceleration(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   Press-to-select: fires left click after brief stick tap
+   ══════════════════════════════════════════════════════════════ */
+static void pts_fire(CFRunLoopTimerRef timer, void *info) {
+    (void)info;
+    CFRunLoopTimerInvalidate(timer);
+    s_pts_timer = NULL;
+    if (!s_pts_tracking) return;
+    s_pts_tracking = false;
+    CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, s_pts_pos, kCGMouseButtonLeft);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp,   s_pts_pos, kCGMouseButtonLeft);
+    CGEventPost(kCGSessionEventTap, dn);
+    CGEventPost(kCGSessionEventTap, up);
+    CFRelease(dn); CFRelease(up);
+    LOG("press-to-select: click at (%.0f, %.0f)", s_pts_pos.x, s_pts_pos.y);
+}
+
+/* ══════════════════════════════════════════════════════════════
    Unified CGEventTap at kCGHIDEventTap
    Handles: Right Option→F18, middle-button scroll, sensitivity scaling
    ══════════════════════════════════════════════════════════════ */
@@ -542,6 +604,32 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             CGEventSetLocation(event, newPos);
             CGEventSetDoubleValueField(event, kCGMouseEventDeltaX, newDx);
             CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, newDy);
+
+            /* Press-to-select: track brief stick bursts */
+            if (s_ptsEnabled) {
+                double rawSpeed = sqrt(dx * dx + dy * dy);
+                if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
+                if (!s_pts_tracking) {
+                    s_pts_tracking = true;
+                    s_pts_startTime = CFAbsoluteTimeGetCurrent();
+                    s_pts_totalDist = rawSpeed;
+                } else {
+                    s_pts_totalDist += rawSpeed;
+                }
+                s_pts_pos = newPos;
+                bool valid = (CFAbsoluteTimeGetCurrent() - s_pts_startTime) < PTS_MAX_DURATION
+                          && s_pts_totalDist < PTS_MAX_DIST;
+                if (!valid) {
+                    s_pts_tracking = false;
+                } else {
+                    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
+                    s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
+                        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
+                        0, 0, 0, pts_fire, &ctx);
+                    CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
+                }
+            }
+
             return event;
         }
     }
@@ -647,6 +735,8 @@ int main(int argc, const char *argv[]) {
             s_swapEnabled = [ud boolForKey:PREF_SWAP];
         if ([ud objectForKey:PREF_SCROLL_SPEED])
             s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
+        if ([ud objectForKey:PREF_PTS])
+            s_ptsEnabled  = [ud boolForKey:PREF_PTS];
 
         LOG("prefs: sensitivity=%d (%.2fx) scrollSpeed=%.1f f18=%s swap=%s",
             s_sensitivity, sensitivity_factor(), s_scrollSpeed,
