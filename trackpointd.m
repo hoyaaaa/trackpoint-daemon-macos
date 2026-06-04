@@ -58,6 +58,10 @@ static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
 static CGRect  s_displayBounds;
 
+/* ThinkPad device origin tracking (temporal correlation) */
+#define TP_MOVE_WINDOW   0.030  /* 30ms: CGEvent within this after HID report = from ThinkPad */
+static CFAbsoluteTime    s_tp_last_move  = 0;
+
 /* Press-to-select state */
 static bool              s_ptsEnabled    = false;
 static bool              s_pts_tracking  = false;  /* active tap session */
@@ -594,8 +598,10 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
             return NULL;  /* consume move event during scroll */
         } else {
-            /* Sensitivity + acceleration scaling */
+            /* Sensitivity + acceleration scaling — ThinkPad only */
             if (!s_tpCount) return event;
+            bool from_tp = (CFAbsoluteTimeGetCurrent() - s_tp_last_move) < TP_MOVE_WINDOW;
+            if (!from_tp) return event;
             double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
             double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
             if (dx == 0.0 && dy == 0.0) return event;
@@ -689,9 +695,23 @@ static void try_create_event_tap(void) {
 /* ══════════════════════════════════════════════════════════════
    IOHIDManager — ThinkPad connection detection
    ══════════════════════════════════════════════════════════════ */
+/* Called when ThinkPad reports mouse axis movement — marks origin timestamp */
+static void hid_value_callback(void *ctx, IOReturn result, void *sender, IOHIDValueRef value) {
+    (void)ctx; (void)result; (void)sender;
+    IOHIDElementRef elem = IOHIDValueGetElement(value);
+    uint32_t page  = IOHIDElementGetUsagePage(elem);
+    uint32_t usage = IOHIDElementGetUsage(elem);
+    /* Generic Desktop: X (0x30) or Y (0x31) axis */
+    if (page == 0x01 && (usage == 0x30 || usage == 0x31)) {
+        if (IOHIDValueGetIntegerValue(value) != 0)
+            s_tp_last_move = CFAbsoluteTimeGetCurrent();
+    }
+}
+
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
-    (void)ctx; (void)r; (void)sender; (void)dev;
+    (void)ctx; (void)r; (void)sender;
     IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
+    IOHIDDeviceRegisterInputValueCallback(dev, hid_value_callback, NULL);
     s_tpCount++;
     set_tap_enabled(true);
 }
