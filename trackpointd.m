@@ -744,7 +744,7 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
             s_tp_queue = queue;
             LOG("HID queue created with %d X/Y elements", added);
         } else {
-            CFRelease(queue);
+            if (queue) CFRelease(queue);
             LOG("HID queue: no X/Y elements on this device (trying next)");
         }
     }
