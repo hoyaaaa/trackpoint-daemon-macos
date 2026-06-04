@@ -95,7 +95,7 @@ Click the menu bar icon (`TP+` when connected, `TP-` when not, `TP!` if accessib
 | Pointer sensitivity (1–9 scale) | ✓ (software scaling, not hardware) |
 | Scroll speed adjustment | ✓ |
 | Non-linear scroll curve | ✓ (approximate) |
-| Acceleration curve | Partial — flat linear while connected (Windows uses a sigmoid curve) |
+| Acceleration curve | ✓ (sigmoid 1.0x–2.5x, approximate) |
 | Press-to-select | Not implemented |
 
 ## License
