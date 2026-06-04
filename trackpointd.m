@@ -59,8 +59,9 @@ static double  s_scrollAccumY = 0.0;
 static CGRect  s_displayBounds;
 
 /* Press-to-select state */
-static bool              s_ptsEnabled   = false;
-static bool              s_pts_tracking = false;
+static bool              s_ptsEnabled    = false;
+static bool              s_pts_tracking  = false;  /* active tap session */
+static bool              s_pts_inhibit   = false;  /* gesture too large — wait for stick stop */
 static double            s_pts_totalDist = 0;
 static CFAbsoluteTime    s_pts_startTime = 0;
 static CGPoint           s_pts_pos       = {0, 0};
@@ -337,9 +338,9 @@ static SettingsWindowController *g_settings = nil;
 - (void)togglePts:(NSButton *)btn {
     s_ptsEnabled = (btn.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:s_ptsEnabled forKey:PREF_PTS];
-    if (!s_ptsEnabled && s_pts_timer) {
-        CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL;
-        s_pts_tracking = false;
+    if (!s_ptsEnabled) {
+        if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
+        s_pts_tracking = false; s_pts_inhibit = false;
     }
     LOG("press-to-select: %s", s_ptsEnabled ? "ON" : "OFF");
 }
@@ -486,6 +487,11 @@ static void pts_fire(CFRunLoopTimerRef timer, void *info) {
     (void)info;
     CFRunLoopTimerInvalidate(timer);
     s_pts_timer = NULL;
+    if (s_pts_inhibit) {
+        /* gesture was too large — stick stopped, clear inhibit, no click */
+        s_pts_inhibit = false;
+        return;
+    }
     if (!s_pts_tracking) return;
     s_pts_tracking = false;
     CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, s_pts_pos, kCGMouseButtonLeft);
@@ -535,6 +541,9 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             s_hasMoved = false;
             s_lastPos = CGEventGetLocation(event);
             s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+            /* cancel any pending PTS on middle-down */
+            if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
+            s_pts_tracking = false; s_pts_inhibit = false;
             return NULL;
         }
     }
@@ -608,26 +617,35 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             /* Press-to-select: track brief stick bursts */
             if (s_ptsEnabled) {
                 double rawSpeed = sqrt(dx * dx + dy * dy);
+                /* always cancel pending stop timer on new movement */
                 if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
-                if (!s_pts_tracking) {
+
+                if (s_pts_inhibit) {
+                    /* gesture already failed — just reschedule "stick stopped" clear */
+                } else if (!s_pts_tracking) {
+                    /* start new session */
                     s_pts_tracking = true;
                     s_pts_startTime = CFAbsoluteTimeGetCurrent();
                     s_pts_totalDist = rawSpeed;
+                    s_pts_pos = newPos;
                 } else {
                     s_pts_totalDist += rawSpeed;
+                    s_pts_pos = newPos;
+                    bool valid = (CFAbsoluteTimeGetCurrent() - s_pts_startTime) < PTS_MAX_DURATION
+                              && s_pts_totalDist < PTS_MAX_DIST;
+                    if (!valid) {
+                        /* too long/far — inhibit until stick stops */
+                        s_pts_tracking = false;
+                        s_pts_inhibit  = true;
+                    }
                 }
-                s_pts_pos = newPos;
-                bool valid = (CFAbsoluteTimeGetCurrent() - s_pts_startTime) < PTS_MAX_DURATION
-                          && s_pts_totalDist < PTS_MAX_DIST;
-                if (!valid) {
-                    s_pts_tracking = false;
-                } else {
-                    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
-                    s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
-                        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
-                        0, 0, 0, pts_fire, &ctx);
-                    CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
-                }
+
+                /* schedule stop detection regardless (clears inhibit or fires click) */
+                CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
+                s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
+                    CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
+                    0, 0, 0, pts_fire, &ctx);
+                CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
             }
 
             return event;
