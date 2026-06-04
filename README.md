@@ -72,6 +72,7 @@ Click the menu bar icon (`TP+` when connected, `TP-` when not, `TP!` if accessib
 | Left Opt ↔ Left Cmd Swap | Fix modifier key order for macOS layout |
 | Pointer Sensitivity | 1 (slow) – 9 (fast), default 5. Applied in software, works over BLE. |
 | Scroll Speed | 1.0 (slow) – 8.0 (fast), default 3.5. |
+| Press-to-Select | Tap the TrackPoint stick briefly → left click. Off by default. |
 
 ## How it works
 
@@ -96,7 +97,7 @@ Click the menu bar icon (`TP+` when connected, `TP-` when not, `TP!` if accessib
 | Scroll speed adjustment | ✓ |
 | Non-linear scroll curve | ✓ (approximate) |
 | Acceleration curve | ✓ (sigmoid 1.0x–2.5x, approximate) |
-| Press-to-select | Not implemented |
+| Press-to-select | ✓ (tap stick → left click; enable in Settings) |
 
 ## License
 
