@@ -532,6 +532,14 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return NULL;
     }
+    /* Safety: plain MouseMoved while middleDown means we missed the MouseUp (tap was
+       disabled at release moment). Reset state and pass event through. */
+    if (s_middleDown && type == kCGEventMouseMoved) {
+        LOG("missed OtherMouseUp — resetting middleDown");
+        s_middleDown = false;
+        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+        return event;
+    }
     if (s_middleDown && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
         CGPoint p = CGEventGetLocation(event);
         double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
