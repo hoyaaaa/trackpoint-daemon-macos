@@ -19,6 +19,7 @@
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/hidsystem/IOHIDParameter.h>
 #import <math.h>
+#import <mach/mach_time.h>
 
 /* ── Config ───────────────────────────────────────────────────── */
 #define TP_SENSITIVITY_DEFAULT  5   /* 1-9 scale, 5 = neutral */
@@ -601,26 +602,31 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             /* Sensitivity + acceleration scaling — ThinkPad origin only */
             if (!s_tpCount) return event;
 
-            /* Poll IOHIDQueue to confirm this event came from the ThinkPad pointing device.
-             * Fallback: if queue is nil or never produced values, trust s_tpCount > 0. */
+            /* Poll IOHIDQueue: event is from ThinkPad if queue has FRESH values (< 15ms old).
+             * CGEventTap fires before IOHIDManager for the same event, so queue holds values
+             * from the PREVIOUS HID report (~8ms ago at 125Hz). Stale values (> 15ms) are
+             * from an idle TrackPoint and must be drained without counting as ThinkPad origin.
+             * Fallback: if queue never produces values, trust s_tpCount > 0. */
             if (s_tp_queue) {
-                bool has_tp_values = false;
+                static mach_timebase_info_data_t s_tb;
+                if (s_tb.denom == 0) mach_timebase_info(&s_tb);
+                uint64_t now = mach_absolute_time();
+                bool has_fresh = false;
                 IOHIDValueRef val;
-                int drained = 0;
-                while (drained < 8 && (val = IOHIDQueueCopyNextValueWithTimeout(s_tp_queue, 0)) != NULL) {
-                    has_tp_values = true;
+                /* Drain entire queue; only count values fresher than 15ms */
+                while ((val = IOHIDQueueCopyNextValueWithTimeout(s_tp_queue, 0)) != NULL) {
+                    uint64_t ts  = IOHIDValueGetTimeStamp(val);
+                    uint64_t age_ns = (now - ts) * s_tb.numer / s_tb.denom;
+                    if (age_ns < 15000000ULL) has_fresh = true;   /* 15ms */
                     CFRelease(val);
-                    drained++;
                 }
-                if (has_tp_values && !s_tp_queue_ok) {
+                if (has_fresh && !s_tp_queue_ok) {
                     s_tp_queue_ok = true;
                     LOG("HID queue confirmed working — per-device filtering active");
                 }
-                if (s_tp_queue_ok && !has_tp_values) {
-                    /* Queue works but empty → not a ThinkPad event */
-                    return event;
+                if (s_tp_queue_ok && !has_fresh) {
+                    return event;  /* no fresh ThinkPad values → other device */
                 }
-                /* if !s_tp_queue_ok: queue hasn't produced values yet → fall through (allow) */
             }
 
             double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
