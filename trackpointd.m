@@ -378,6 +378,7 @@ static AppDelegate *g_app = nil;
 - (void)pollAccess:(NSTimer *)t {
     if (AXIsProcessTrusted()) {
         [t invalidate]; self.accessTimer = nil;
+        try_create_event_tap();  /* tap 직접 생성 — refresh 경유 시 timer=nil로 조건 미충족 */
         [self refresh];
     }
 }
