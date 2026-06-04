@@ -469,7 +469,7 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
 }
 
 static void set_tap_enabled(bool enabled) {
-    if (s_tap) CGEventTapEnable(s_tap, true);
+    if (s_tap) CGEventTapEnable(s_tap, enabled);
     LOG("ThinkPad %s — scroll %s", enabled ? "connected" : "disconnected", enabled ? "ON" : "OFF");
     apply_key_remap();
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
@@ -486,7 +486,7 @@ static void try_create_event_tap(void) {
     if (!s_scale_tap) {
         CGEventMask scaleMask = CGEventMaskBit(kCGEventMouseMoved) |
                                 CGEventMaskBit(kCGEventOtherMouseDragged);
-        s_scale_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
+        s_scale_tap = CGEventTapCreate(kCGAnnotatedSessionEventTap, kCGHeadInsertEventTap,
                                         kCGEventTapOptionDefault,
                                         scaleMask, scale_callback, NULL);
         if (s_scale_tap) {
