@@ -32,6 +32,7 @@
 #define PREF_SENSITIVITY  @"tpSensitivity"
 #define PREF_F18          @"tpF18Enabled"
 #define PREF_SWAP         @"tpSwapEnabled"
+#define PREF_SCROLL_SPEED @"tpScrollSpeed"
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
@@ -47,6 +48,11 @@ static CGPoint           s_lastPos    = {0, 0};
 static bool    s_f18Enabled  = false;
 static bool    s_swapEnabled = false;
 static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
+static double  s_scrollSpeed = SCROLL_SPEED;
+static bool    s_naturalScroll = false;
+static double  s_scrollAccumX = 0.0;
+static double  s_scrollAccumY = 0.0;
+static CGRect  s_displayBounds;
 
 /* sensitivity 1-9 -> scale factor via exponential curve
    1 -> ~0.37x, 5 -> 1.0x, 9 -> ~2.72x */
@@ -69,6 +75,8 @@ static void apply_key_remap(void);
 @property (strong) NSButton    *swapCheck;
 @property (strong) NSSlider    *slider;
 @property (strong) NSTextField *valueLabel;
+@property (strong) NSSlider    *scrollSlider;
+@property (strong) NSTextField *scrollValueLabel;
 @property (strong) NSButton    *grantBtn;
 - (void)syncState;
 @end
@@ -79,7 +87,7 @@ static SettingsWindowController *g_settings = nil;
 
 - (instancetype)init {
     NSWindow *win = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 360, 300)
+        initWithContentRect:NSMakeRect(0, 0, 360, 390)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered
         defer:NO];
@@ -94,7 +102,7 @@ static SettingsWindowController *g_settings = nil;
 - (void)buildUI {
     NSView *cv = self.window.contentView;
     CGFloat W = 360, pad = 20;
-    CGFloat y = 260;
+    CGFloat y = 350;
 
     /* ── Status ── */
     NSTextField *sh = [NSTextField labelWithString:@"Status"];
@@ -192,6 +200,51 @@ static SettingsWindowController *g_settings = nil;
     self.valueLabel.alignment = NSTextAlignmentCenter;
     self.valueLabel.frame = NSMakeRect(0, y, W, 16);
     [cv addSubview:self.valueLabel];
+    y -= 16;
+
+    /* ── Separator ── */
+    NSBox *sep3 = [[NSBox alloc] initWithFrame:NSMakeRect(pad, y, W - pad*2, 1)];
+    sep3.boxType = NSBoxSeparator;
+    [cv addSubview:sep3];
+    y -= 18;
+
+    /* ── Scroll Speed ── */
+    NSTextField *scrollH = [NSTextField labelWithString:@"Scroll Speed"];
+    scrollH.font = [NSFont boldSystemFontOfSize:12];
+    scrollH.frame = NSMakeRect(pad, y, W - pad*2, 18);
+    [cv addSubview:scrollH];
+    y -= 28;
+
+    NSTextField *sMinLbl = [NSTextField labelWithString:@"Slow"];
+    sMinLbl.font = [NSFont systemFontOfSize:10];
+    sMinLbl.textColor = [NSColor secondaryLabelColor];
+    sMinLbl.frame = NSMakeRect(pad, y + 3, 30, 16);
+    [cv addSubview:sMinLbl];
+
+    NSTextField *sMaxLbl = [NSTextField labelWithString:@"Fast"];
+    sMaxLbl.font = [NSFont systemFontOfSize:10];
+    sMaxLbl.textColor = [NSColor secondaryLabelColor];
+    sMaxLbl.alignment = NSTextAlignmentRight;
+    sMaxLbl.frame = NSMakeRect(W - pad - 30, y + 3, 30, 16);
+    [cv addSubview:sMaxLbl];
+
+    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(pad + 34, y, W - pad*2 - 68, 22)];
+    self.scrollSlider.minValue = 1.0;
+    self.scrollSlider.maxValue = 8.0;
+    self.scrollSlider.doubleValue = s_scrollSpeed;
+    self.scrollSlider.continuous = YES;
+    self.scrollSlider.target = self;
+    self.scrollSlider.action = @selector(scrollSliderChanged:);
+    [cv addSubview:self.scrollSlider];
+    y -= 22;
+
+    self.scrollValueLabel = [NSTextField labelWithString:
+        [NSString stringWithFormat:@"%.1f", s_scrollSpeed]];
+    self.scrollValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    self.scrollValueLabel.textColor = [NSColor secondaryLabelColor];
+    self.scrollValueLabel.alignment = NSTextAlignmentCenter;
+    self.scrollValueLabel.frame = NSMakeRect(0, y, W, 16);
+    [cv addSubview:self.scrollValueLabel];
 
     [self syncState];
 }
@@ -214,6 +267,9 @@ static SettingsWindowController *g_settings = nil;
 
     self.slider.integerValue = s_sensitivity;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", s_sensitivity];
+
+    self.scrollSlider.doubleValue = s_scrollSpeed;
+    self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", s_scrollSpeed];
 }
 
 - (void)sliderChanged:(NSSlider *)slider {
@@ -222,6 +278,14 @@ static SettingsWindowController *g_settings = nil;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", val];
     [[NSUserDefaults standardUserDefaults] setInteger:val forKey:PREF_SENSITIVITY];
     LOG("sensitivity -> %d (factor %.2fx)", val, sensitivity_factor());
+}
+
+- (void)scrollSliderChanged:(NSSlider *)slider {
+    double val = slider.doubleValue;
+    s_scrollSpeed = val;
+    self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", val];
+    [[NSUserDefaults standardUserDefaults] setDouble:val forKey:PREF_SCROLL_SPEED];
+    LOG("scroll speed -> %.1f", val);
 }
 
 - (void)toggleF18:(NSButton *)btn {
@@ -263,6 +327,9 @@ static AppDelegate *g_app = nil;
     g_settings = [SettingsWindowController new];
     [self buildMenu];
     [self refresh];
+    s_displayBounds = CGDisplayBounds(CGMainDisplayID());
+    s_naturalScroll = [[NSUserDefaults standardUserDefaults]
+        boolForKey:@"com.apple.swipescrolldirection"];
     disable_acceleration();
     setup_hid();
     try_create_event_tap();
@@ -374,6 +441,10 @@ static void disable_acceleration(void) {
 static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
                                   CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (s_scale_tap) CGEventTapEnable(s_scale_tap, true);
+        return event;
+    }
     if (!s_tpCount) return event;
     if (s_middleDown) return event;
 
@@ -393,8 +464,8 @@ static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
     CGPoint pos = CGEventGetLocation(event);
     CGPoint newPos = { pos.x + (newDx - dx), pos.y + (newDy - dy) };
 
-    /* Clamp to main display bounds */
-    CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+    /* Clamp to main display bounds (cached) */
+    CGRect bounds = s_displayBounds;
     newPos.x = MAX(bounds.origin.x, MIN(bounds.origin.x + bounds.size.width  - 1, newPos.x));
     newPos.y = MAX(bounds.origin.y, MIN(bounds.origin.y + bounds.size.height - 1, newPos.y));
 
@@ -410,6 +481,10 @@ static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
 static CGEventRef kbd_callback(CGEventTapProxy proxy, CGEventType type,
                                 CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (s_kbd_tap) CGEventTapEnable(s_kbd_tap, true);
+        return event;
+    }
     if (type != kCGEventFlagsChanged) return event;
     if (!s_f18Enabled) return event;
 
@@ -423,7 +498,7 @@ static CGEventRef kbd_callback(CGEventTapProxy proxy, CGEventType type,
     CGEventRef f18 = CGEventCreateKeyboardEvent(NULL, 0x4F, down);
     CGEventPost(kCGHIDEventTap, f18);
     CFRelease(f18);
-    return event;
+    return NULL;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -432,6 +507,10 @@ static CGEventRef kbd_callback(CGEventTapProxy proxy, CGEventType type,
 static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
                                   CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (s_tap) CGEventTapEnable(s_tap, true);
+        return event;
+    }
     int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
 
     if (type == kCGEventOtherMouseDown && btn == 2) {
@@ -442,6 +521,7 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
     }
     if (type == kCGEventOtherMouseUp && btn == 2) {
         s_middleDown = false;
+        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
         if (!s_hasMoved) {
             CGPoint p = CGEventGetLocation(event);
             CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown, p, kCGMouseButtonCenter);
@@ -456,12 +536,21 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
         CGPoint p = CGEventGetLocation(event);
         double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
         s_lastPos = p;
-        if (fabs(dx) > SCROLL_THRESHOLD || fabs(dy) > SCROLL_THRESHOLD) {
+        s_scrollAccumX += dx;
+        s_scrollAccumY += dy;
+        double adx = fabs(s_scrollAccumX), ady = fabs(s_scrollAccumY);
+        if (adx > SCROLL_THRESHOLD || ady > SCROLL_THRESHOLD) {
             s_hasMoved = true;
+            double vx = copysign(pow(adx, 1.4) * s_scrollSpeed, s_scrollAccumX);
+            double vy = copysign(pow(ady, 1.4) * s_scrollSpeed, s_scrollAccumY);
+            int sign = s_naturalScroll ? 1 : -1;
             CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
-                -(int32_t)round(dy * SCROLL_SPEED), -(int32_t)round(dx * SCROLL_SPEED));
+                (int32_t)round(vy * sign),
+                (int32_t)round(vx * sign));
             CGEventPost(kCGSessionEventTap, sc);
             CFRelease(sc);
+            s_scrollAccumX = 0.0;
+            s_scrollAccumY = 0.0;
         }
         return NULL;
     }
@@ -486,7 +575,7 @@ static void try_create_event_tap(void) {
     if (!s_scale_tap) {
         CGEventMask scaleMask = CGEventMaskBit(kCGEventMouseMoved) |
                                 CGEventMaskBit(kCGEventOtherMouseDragged);
-        s_scale_tap = CGEventTapCreate(kCGAnnotatedSessionEventTap, kCGHeadInsertEventTap,
+        s_scale_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
                                         kCGEventTapOptionDefault,
                                         scaleMask, scale_callback, NULL);
         if (s_scale_tap) {
@@ -555,7 +644,25 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
 
 static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender; (void)dev;
-    if (--s_tpCount <= 0) { s_tpCount = 0; s_middleDown = false; set_tap_enabled(false); }
+    if (--s_tpCount <= 0) {
+        s_tpCount = 0; s_middleDown = false;
+        set_tap_enabled(false);
+        /* restore default mouse acceleration */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        io_service_t svc = IOServiceGetMatchingService(
+            kIOMasterPortDefault, IOServiceMatching(kIOHIDSystemClass));
+        if (svc) {
+            io_connect_t conn;
+            if (IOServiceOpen(svc, mach_task_self(), kIOHIDParamConnectType, &conn) == KERN_SUCCESS) {
+                IOHIDSetMouseAcceleration(conn, 0.6875);  /* macOS default */
+                IOServiceClose(conn);
+            }
+            IOObjectRelease(svc);
+        }
+#pragma clang diagnostic pop
+        LOG("acceleration restored to default");
+    }
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
@@ -590,9 +697,11 @@ int main(int argc, const char *argv[]) {
             s_f18Enabled  = [ud boolForKey:PREF_F18];
         if ([ud objectForKey:PREF_SWAP])
             s_swapEnabled = [ud boolForKey:PREF_SWAP];
+        if ([ud objectForKey:PREF_SCROLL_SPEED])
+            s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
 
-        LOG("prefs: sensitivity=%d (%.2fx) f18=%s swap=%s",
-            s_sensitivity, sensitivity_factor(),
+        LOG("prefs: sensitivity=%d (%.2fx) scrollSpeed=%.1f f18=%s swap=%s",
+            s_sensitivity, sensitivity_factor(), s_scrollSpeed,
             s_f18Enabled ? "on" : "off", s_swapEnabled ? "on" : "off");
 
         NSApplication *app = [NSApplication sharedApplication];
