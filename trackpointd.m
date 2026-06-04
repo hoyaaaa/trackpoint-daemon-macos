@@ -448,8 +448,18 @@ static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
         return event;
     }
     if (!s_tpCount) return event;
-    bool btn2held = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonCenter);
-    if (btn2held) return event;
+    /* Safety net: catch OtherMouseUp at kCGHIDEventTap level — even if mouse_callback's
+       tap was disabled at the moment of release, we always reset s_middleDown here. */
+    if (type == kCGEventOtherMouseUp) {
+        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+        if (btn == 2) {
+            if (s_middleDown) LOG("scale_tap: middle UP safety reset");
+            s_middleDown = false;
+            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+        }
+        return event;
+    }
+    if (s_middleDown) return event;
 
     double factor = sensitivity_factor();
     if (fabs(factor - 1.0) < 0.01) return event;
@@ -539,9 +549,7 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return NULL;
     }
-    /* Direct HID query — immune to missed MouseUp events */
-    bool btn2held = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonCenter);
-    if (btn2held && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
+    if (s_middleDown && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
         CGPoint p = CGEventGetLocation(event);
         double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
         s_lastPos = p;
@@ -564,12 +572,6 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return NULL;
     }
-    /* If s_middleDown is stale but HID says button is released, clean up */
-    if (s_middleDown && !btn2held) {
-        LOG("stale s_middleDown cleared (HID says button released)");
-        s_middleDown = false;
-        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-    }
     return event;
 }
 
@@ -590,7 +592,8 @@ static void try_create_event_tap(void) {
     /* ── Scale tap: kCGHIDEventTap (mouse delta scaling) ── */
     if (!s_scale_tap) {
         CGEventMask scaleMask = CGEventMaskBit(kCGEventMouseMoved) |
-                                CGEventMaskBit(kCGEventOtherMouseDragged);
+                                CGEventMaskBit(kCGEventOtherMouseDragged) |
+                                CGEventMaskBit(kCGEventOtherMouseUp);
         s_scale_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
                                         kCGEventTapOptionDefault,
                                         scaleMask, scale_callback, NULL);
