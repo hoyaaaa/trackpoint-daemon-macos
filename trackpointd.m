@@ -58,6 +58,10 @@ static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
 static CGRect  s_displayBounds;
 
+/* Per-device filtering via IOHIDQueue polling */
+static IOHIDQueueRef s_tp_queue = NULL;   /* X/Y element queue for ThinkPad pointing device */
+static bool          s_tp_queue_ok = false; /* queue confirmed working (got at least one value) */
+
 /* Press-to-select state */
 static bool              s_ptsEnabled    = false;
 static bool              s_pts_tracking  = false;  /* active tap session */
@@ -594,8 +598,31 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
             return NULL;  /* consume move event during scroll */
         } else {
-            /* Sensitivity + acceleration scaling — ThinkPad connected only */
+            /* Sensitivity + acceleration scaling — ThinkPad origin only */
             if (!s_tpCount) return event;
+
+            /* Poll IOHIDQueue to confirm this event came from the ThinkPad pointing device.
+             * Fallback: if queue is nil or never produced values, trust s_tpCount > 0. */
+            if (s_tp_queue) {
+                bool has_tp_values = false;
+                IOHIDValueRef val;
+                int drained = 0;
+                while (drained < 8 && (val = IOHIDQueueCopyNextValueWithTimeout(s_tp_queue, 0)) != NULL) {
+                    has_tp_values = true;
+                    CFRelease(val);
+                    drained++;
+                }
+                if (has_tp_values && !s_tp_queue_ok) {
+                    s_tp_queue_ok = true;
+                    LOG("HID queue confirmed working — per-device filtering active");
+                }
+                if (s_tp_queue_ok && !has_tp_values) {
+                    /* Queue works but empty → not a ThinkPad event */
+                    return event;
+                }
+                /* if !s_tp_queue_ok: queue hasn't produced values yet → fall through (allow) */
+            }
+
             double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
             double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
             if (dx == 0.0 && dy == 0.0) return event;
@@ -690,9 +717,38 @@ static void try_create_event_tap(void) {
    IOHIDManager — ThinkPad connection detection
    ══════════════════════════════════════════════════════════════ */
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
-    (void)ctx; (void)r; (void)sender; (void)dev;
+    (void)ctx; (void)r; (void)sender;
     IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
     s_tpCount++;
+
+    /* Try to build X/Y queue on any ThinkPad device that exposes mouse axes */
+    if (!s_tp_queue) {
+        IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, dev, 64, kIOHIDOptionsTypeNone);
+        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
+        int added = 0;
+        if (elems) {
+            for (CFIndex i = 0; i < CFArrayGetCount(elems); i++) {
+                IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
+                uint32_t ePage  = IOHIDElementGetUsagePage(elem);
+                uint32_t eUsage = IOHIDElementGetUsage(elem);
+                if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) { /* X=0x30, Y=0x31 */
+                    IOHIDQueueAddElement(queue, elem);
+                    added++;
+                    LOG("HID queue: added usagePage=%d usage=0x%02X", ePage, eUsage);
+                }
+            }
+            CFRelease(elems);
+        }
+        if (added > 0) {
+            IOHIDQueueStart(queue);
+            s_tp_queue = queue;
+            LOG("HID queue created with %d X/Y elements", added);
+        } else {
+            CFRelease(queue);
+            LOG("HID queue: no X/Y elements on this device (trying next)");
+        }
+    }
+
     set_tap_enabled(true);
 }
 
@@ -700,6 +756,12 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
     (void)ctx; (void)r; (void)sender; (void)dev;
     if (--s_tpCount <= 0) {
         s_tpCount = 0; s_middleDown = false;
+        if (s_tp_queue) {
+            IOHIDQueueStop(s_tp_queue);
+            CFRelease(s_tp_queue);
+            s_tp_queue = NULL;
+            s_tp_queue_ok = false;
+        }
         set_tap_enabled(false);
         /* restore default mouse acceleration */
 #pragma clang diagnostic push
