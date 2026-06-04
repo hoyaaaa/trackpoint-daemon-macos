@@ -15,6 +15,13 @@ echo "=============================="
 echo " TrackPoint daemon install"
 echo "=============================="
 
+# ── 0. Stop running instance ────────────────────────────────────
+if pgrep -f "trackpointd" > /dev/null 2>&1; then
+    log "Stopping running TrackPointD..."
+    pkill -f "trackpointd" 2>/dev/null || true
+    sleep 0.5
+fi
+
 # ── 1. Compile (only if source changed) ───────────────────────
 mkdir -p "$APP/Contents/MacOS"
 
