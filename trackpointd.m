@@ -442,11 +442,14 @@ static CGEventRef scale_callback(CGEventTapProxy proxy, CGEventType type,
                                   CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        LOG("scale tap re-enabled (was disabled by %s)",
+            type == kCGEventTapDisabledByTimeout ? "timeout" : "user");
         if (s_scale_tap) CGEventTapEnable(s_scale_tap, true);
         return event;
     }
     if (!s_tpCount) return event;
-    if (s_middleDown) return event;
+    bool btn2held = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonCenter);
+    if (btn2held) return event;
 
     double factor = sensitivity_factor();
     if (fabs(factor - 1.0) < 0.01) return event;
@@ -508,6 +511,8 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
                                   CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        LOG("mouse tap re-enabled (was disabled by %s)",
+            type == kCGEventTapDisabledByTimeout ? "timeout" : "user");
         if (s_tap) CGEventTapEnable(s_tap, true);
         return event;
     }
@@ -515,11 +520,13 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
 
     if (type == kCGEventOtherMouseDown && btn == 2) {
         if (!s_tpCount) return event;
+        LOG("middle DOWN");
         s_middleDown = true; s_hasMoved = false;
         s_lastPos = CGEventGetLocation(event);
         return NULL;
     }
     if (type == kCGEventOtherMouseUp && btn == 2) {
+        LOG("middle UP (moved=%s)", s_hasMoved ? "yes" : "no");
         s_middleDown = false;
         s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
         if (!s_hasMoved) {
@@ -532,15 +539,9 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return NULL;
     }
-    /* Safety: plain MouseMoved while middleDown means we missed the MouseUp (tap was
-       disabled at release moment). Reset state and pass event through. */
-    if (s_middleDown && type == kCGEventMouseMoved) {
-        LOG("missed OtherMouseUp — resetting middleDown");
-        s_middleDown = false;
-        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-        return event;
-    }
-    if (s_middleDown && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
+    /* Direct HID query — immune to missed MouseUp events */
+    bool btn2held = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonCenter);
+    if (btn2held && (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged)) {
         CGPoint p = CGEventGetLocation(event);
         double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
         s_lastPos = p;
@@ -555,12 +556,19 @@ static CGEventRef mouse_callback(CGEventTapProxy proxy, CGEventType type,
             CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
                 (int32_t)round(vy * sign),
                 (int32_t)round(vx * sign));
+            LOG("scroll dy=%d dx=%d", (int32_t)round(vy * sign), (int32_t)round(vx * sign));
             CGEventPost(kCGSessionEventTap, sc);
             CFRelease(sc);
             s_scrollAccumX = 0.0;
             s_scrollAccumY = 0.0;
         }
         return NULL;
+    }
+    /* If s_middleDown is stale but HID says button is released, clean up */
+    if (s_middleDown && !btn2held) {
+        LOG("stale s_middleDown cleared (HID says button released)");
+        s_middleDown = false;
+        s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
     }
     return event;
 }
