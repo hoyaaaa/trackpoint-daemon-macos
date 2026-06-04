@@ -49,6 +49,7 @@ static int               s_tpCount    = 0;
 static bool              s_middleDown = false;
 static bool              s_hasMoved   = false;
 static CGPoint           s_lastPos    = {0, 0};
+static CFMutableArrayRef s_tp_devices = NULL;  /* retained ThinkPad device refs for queue retry */
 
 static bool    s_f18Enabled  = false;
 static bool    s_swapEnabled = false;
@@ -60,8 +61,14 @@ static double  s_scrollAccumY = 0.0;
 static CGRect  s_displayBounds;
 
 /* Per-device filtering via IOHIDQueue polling */
-static IOHIDQueueRef s_tp_queue = NULL;   /* X/Y element queue for ThinkPad pointing device */
+static IOHIDQueueRef s_tp_queue = NULL;     /* X/Y element queue for ThinkPad pointing device */
 static bool          s_tp_queue_ok = false; /* queue confirmed working (got at least one value) */
+static uint64_t      s_last_tp_time = 0;   /* mach_absolute_time of last fresh ThinkPad HID value */
+static NSTimer      *s_imTimer = nil;       /* Input Monitoring permission poll timer */
+
+/* If a fresh ThinkPad HID value was seen within this window, treat event as ThinkPad.
+ * Bridges the gap when queue is drained on event N and event N+1 arrives before next HID report. */
+#define TP_RECENCY_NS  50000000ULL   /* 50ms */
 
 /* Press-to-select state */
 static bool              s_ptsEnabled    = false;
@@ -79,6 +86,7 @@ static double sensitivity_factor(void) {
 }
 
 static void try_create_event_tap(void);
+static void try_build_queue_for_devices(void);
 static void disable_acceleration(void);
 static void setup_hid(void);
 static void apply_key_remap(void);
@@ -364,6 +372,7 @@ static SettingsWindowController *g_settings = nil;
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSTimer      *accessTimer;
+@property (strong) NSTimer      *imTimer;
 - (void)refresh;
 @end
 
@@ -378,7 +387,9 @@ static AppDelegate *g_app = nil;
     /* Request Input Monitoring permission (needed for IOHIDQueue per-device filtering) */
     if (!CGPreflightListenEventAccess()) {
         CGRequestListenEventAccess();
-        LOG("Input Monitoring permission requested");
+        LOG("Input Monitoring: not granted — requesting. Per-device filter will activate once granted.");
+        s_imTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self
+            selector:@selector(pollIM:) userInfo:nil repeats:YES];
     } else {
         LOG("Input Monitoring: already granted");
     }
@@ -438,6 +449,20 @@ static AppDelegate *g_app = nil;
         [t invalidate]; self.accessTimer = nil;
         try_create_event_tap();  /* tap 직접 생성 — refresh 경유 시 timer=nil로 조건 미충족 */
         [self refresh];
+    }
+}
+
+- (void)pollIM:(NSTimer *)t {
+    if (CGPreflightListenEventAccess()) {
+        LOG("Input Monitoring: granted — building per-device queue");
+        [t invalidate]; s_imTimer = nil;
+        /* Retry device open + queue build for all already-connected ThinkPad devices */
+        try_build_queue_for_devices();
+        if (!s_tp_queue && s_tp_devices && CFArrayGetCount(s_tp_devices) > 0) {
+            /* Elements not ready yet (BLE) — retry after 2s */
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{ try_build_queue_for_devices(); });
+        }
     }
 }
 
@@ -618,35 +643,36 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                 static mach_timebase_info_data_t s_tb;
                 if (s_tb.denom == 0) mach_timebase_info(&s_tb);
                 uint64_t now = mach_absolute_time();
-                bool has_fresh = false;
+
+                /* Drain queue; if any value is fresh (<15ms), update s_last_tp_time */
                 IOHIDValueRef val;
-                /* Drain entire queue; only count values fresher than 15ms */
                 while ((val = IOHIDQueueCopyNextValueWithTimeout(s_tp_queue, 0)) != NULL) {
-                    uint64_t ts  = IOHIDValueGetTimeStamp(val);
+                    uint64_t ts = IOHIDValueGetTimeStamp(val);
                     uint64_t age_ns = (now - ts) * s_tb.numer / s_tb.denom;
-                    if (age_ns < 15000000ULL) has_fresh = true;   /* 15ms */
+                    if (age_ns < 15000000ULL) {   /* 15ms — fresh HID report */
+                        s_last_tp_time = now;
+                        if (!s_tp_queue_ok) {
+                            s_tp_queue_ok = true;
+                            LOG("HID queue confirmed — per-device filtering active");
+                        }
+                    }
                     CFRelease(val);
                 }
-                if (has_fresh && !s_tp_queue_ok) {
-                    s_tp_queue_ok = true;
-                    LOG("HID queue confirmed working — per-device filtering active");
-                }
-                if (s_tp_queue_ok && !has_fresh) {
-                    static CFAbsoluteTime s_last_other_log = 0;
+
+                if (s_tp_queue_ok) {
+                    /* ThinkPad if we saw a fresh value recently (within 50ms recency window) */
+                    uint64_t since_ns = (now - s_last_tp_time) * s_tb.numer / s_tb.denom;
+                    bool from_tp = (since_ns < TP_RECENCY_NS);
+
+                    static CFAbsoluteTime s_last_filter_log = 0;
                     CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
-                    if (now2 - s_last_other_log > 1.0) {
-                        LOG("other device — filtered (queue empty)");
-                        s_last_other_log = now2;
+                    if (now2 - s_last_filter_log > 1.0) {
+                        LOG("%s (since_tp=%.0fms)", from_tp ? "ThinkPad move" : "other device — filtered",
+                            since_ns / 1e6);
+                        s_last_filter_log = now2;
                     }
-                    return event;
-                }
-                if (s_tp_queue_ok && has_fresh) {
-                    static CFAbsoluteTime s_last_tp_log = 0;
-                    CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
-                    if (now2 - s_last_tp_log > 1.0) {
-                        LOG("ThinkPad move — processing");
-                        s_last_tp_log = now2;
-                    }
+
+                    if (!from_tp) return event;
                 }
             }
 
@@ -743,8 +769,59 @@ static void try_create_event_tap(void) {
 /* ══════════════════════════════════════════════════════════════
    IOHIDManager — ThinkPad connection detection
    ══════════════════════════════════════════════════════════════ */
+
+/* Attempt to open stored ThinkPad devices and build queue.
+ * Called at startup and whenever Input Monitoring permission is detected. */
+static void try_build_queue_for_devices(void) {
+    if (s_tp_queue) return;
+    if (!s_tp_devices || CFArrayGetCount(s_tp_devices) == 0) return;
+
+    CFIndex count = CFArrayGetCount(s_tp_devices);
+    for (CFIndex i = 0; i < count; i++) {
+        IOHIDDeviceRef dev = (IOHIDDeviceRef)CFArrayGetValueAtIndex(s_tp_devices, i);
+        IOReturn openRet = IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
+        LOG("IM-retry: IOHIDDeviceOpen 0x%08X (%s)", openRet,
+            openRet == kIOReturnSuccess     ? "ok" :
+            openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
+        if (openRet != kIOReturnSuccess && openRet != kIOReturnExclusiveAccess) continue;
+
+        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
+        int total = elems ? (int)CFArrayGetCount(elems) : 0;
+        LOG("IM-retry: %d elements found", total);
+        int added = 0;
+        if (total > 0) {
+            IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, dev, 64, kIOHIDOptionsTypeNone);
+            if (queue) {
+                for (CFIndex j = 0; j < total; j++) {
+                    IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, j);
+                    uint32_t ePage  = IOHIDElementGetUsagePage(elem);
+                    uint32_t eUsage = IOHIDElementGetUsage(elem);
+                    if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) {
+                        IOHIDQueueAddElement(queue, elem);
+                        added++;
+                    }
+                }
+                if (added > 0) {
+                    IOHIDQueueStart(queue);
+                    s_tp_queue = queue;
+                    LOG("IM-retry: queue built with %d X/Y elements — per-device filter active", added);
+                } else {
+                    CFRelease(queue);
+                    LOG("IM-retry: no X/Y elements on this device");
+                }
+            }
+        }
+        if (elems) CFRelease(elems);
+        if (s_tp_queue) break;
+    }
+}
+
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
+
+    /* Store device for later retry (e.g. when Input Monitoring granted) */
+    if (s_tp_devices) CFArrayAppendValue(s_tp_devices, dev);  /* array retains */
+
     IOReturn openRet = IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
     LOG("IOHIDDeviceOpen: 0x%08X (%s)", openRet,
         openRet == kIOReturnSuccess ? "ok" :
@@ -806,7 +883,15 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
 }
 
 static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
-    (void)ctx; (void)r; (void)sender; (void)dev;
+    (void)ctx; (void)r; (void)sender;
+
+    /* Remove from stored devices array */
+    if (s_tp_devices) {
+        CFIndex idx = CFArrayGetFirstIndexOfValue(s_tp_devices,
+            CFRangeMake(0, CFArrayGetCount(s_tp_devices)), dev);
+        if (idx != kCFNotFound) CFArrayRemoveValueAtIndex(s_tp_devices, idx);  /* array releases */
+    }
+
     if (--s_tpCount <= 0) {
         s_tpCount = 0; s_middleDown = false;
         if (s_tp_queue) {
@@ -836,6 +921,7 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
 }
 
 static void setup_hid(void) {
+    s_tp_devices = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
     IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     int vid = LENOVO_VID;
     CFNumberRef vidNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &vid);
