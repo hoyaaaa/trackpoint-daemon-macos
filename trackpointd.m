@@ -394,7 +394,13 @@ static AppDelegate *g_app = nil;
         LOG("Input Monitoring: already granted");
     }
     [self refresh];
-    s_displayBounds = CGDisplayBounds(CGMainDisplayID());
+    /* Compute union of all active display bounds for multi-monitor clamping */
+    CGDirectDisplayID displays[8];
+    uint32_t dispCount = 0;
+    CGGetActiveDisplayList(8, displays, &dispCount);
+    s_displayBounds = CGRectZero;
+    for (uint32_t i = 0; i < dispCount; i++)
+        s_displayBounds = CGRectUnion(s_displayBounds, CGDisplayBounds(displays[i]));
     /* key absent = macOS default = natural scroll ON */
     NSNumber *scrollPref = [[NSUserDefaults standardUserDefaults]
         objectForKey:@"com.apple.swipescrolldirection"];
@@ -468,10 +474,24 @@ static AppDelegate *g_app = nil;
 
 - (void)openSettings:(id)sender {
     [g_settings syncState];
+    /* Switch to regular policy so window comes to front over other apps */
+    NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
+    NSImage *icon = [[NSBundle mainBundle] imageForResource:@"TrackPointD"];
+    if (icon) NSApp.applicationIconImage = icon;
     [NSApp activateIgnoringOtherApps:YES];
     [g_settings showWindow:nil];
     [g_settings.window center];
     [g_settings.window makeKeyAndOrderFront:nil];
+    /* Watch for window close to revert to accessory (no Dock icon) */
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self selector:@selector(settingsWindowClosed:)
+        name:NSWindowWillCloseNotification object:g_settings.window];
+}
+
+- (void)settingsWindowClosed:(NSNotification *)n {
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+        name:NSWindowWillCloseNotification object:g_settings.window];
+    NSApp.activationPolicy = NSApplicationActivationPolicyAccessory;
 }
 
 @end
@@ -639,6 +659,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
              * from the PREVIOUS HID report (~8ms ago at 125Hz). Stale values (> 15ms) are
              * from an idle TrackPoint and must be drained without counting as ThinkPad origin.
              * Fallback: if queue never produces values, trust s_tpCount > 0. */
+            bool has_fresh = false;  /* true = definite ThinkPad HID value seen this callback */
             if (s_tp_queue) {
                 static mach_timebase_info_data_t s_tb;
                 if (s_tb.denom == 0) mach_timebase_info(&s_tb);
@@ -650,6 +671,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                     uint64_t ts = IOHIDValueGetTimeStamp(val);
                     uint64_t age_ns = (now - ts) * s_tb.numer / s_tb.denom;
                     if (age_ns < 15000000ULL) {   /* 15ms — fresh HID report */
+                        has_fresh = true;
                         s_last_tp_time = now;
                         if (!s_tp_queue_ok) {
                             s_tp_queue_ok = true;
@@ -660,19 +682,26 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                 }
 
                 if (s_tp_queue_ok) {
-                    /* ThinkPad if we saw a fresh value recently (within 50ms recency window) */
+                    /* ThinkPad if fresh now OR seen within 50ms recency window */
                     uint64_t since_ns = (now - s_last_tp_time) * s_tb.numer / s_tb.denom;
-                    bool from_tp = (since_ns < TP_RECENCY_NS);
+                    bool from_tp = has_fresh || (since_ns < TP_RECENCY_NS);
 
                     static CFAbsoluteTime s_last_filter_log = 0;
                     CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
                     if (now2 - s_last_filter_log > 1.0) {
-                        LOG("%s (since_tp=%.0fms)", from_tp ? "ThinkPad move" : "other device — filtered",
-                            since_ns / 1e6);
+                        LOG("%s (since_tp=%.0fms%s)", from_tp ? "ThinkPad move" : "other device — filtered",
+                            since_ns / 1e6, has_fresh ? ",fresh" : "");
                         s_last_filter_log = now2;
                     }
 
-                    if (!from_tp) return event;
+                    if (!from_tp) {
+                        /* Definite non-ThinkPad — cancel any pending PTS */
+                        if (s_pts_tracking || s_pts_inhibit) {
+                            if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
+                            s_pts_tracking = false; s_pts_inhibit = false;
+                        }
+                        return event;
+                    }
                 }
             }
 
@@ -700,14 +729,20 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                 /* always cancel pending stop timer on new movement */
                 if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
 
+                bool need_timer = false;
                 if (s_pts_inhibit) {
-                    /* gesture already failed — just reschedule "stick stopped" clear */
+                    /* gesture already failed — reschedule "stick stopped" clear */
+                    need_timer = true;
                 } else if (!s_pts_tracking) {
-                    /* start new session */
-                    s_pts_tracking = true;
-                    s_pts_startTime = CFAbsoluteTimeGetCurrent();
-                    s_pts_totalDist = rawSpeed;
-                    s_pts_pos = newPos;
+                    /* Only start new PTS session on confirmed ThinkPad (fresh HID value).
+                     * Recency-only passes (ambiguous device) must not start new sessions. */
+                    if (has_fresh) {
+                        s_pts_tracking = true;
+                        s_pts_startTime = CFAbsoluteTimeGetCurrent();
+                        s_pts_totalDist = rawSpeed;
+                        s_pts_pos = newPos;
+                        need_timer = true;
+                    }
                 } else {
                     s_pts_totalDist += rawSpeed;
                     s_pts_pos = newPos;
@@ -718,14 +753,16 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                         s_pts_tracking = false;
                         s_pts_inhibit  = true;
                     }
+                    need_timer = true;
                 }
 
-                /* schedule stop detection regardless (clears inhibit or fires click) */
-                CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
-                s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
-                    CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
-                    0, 0, 0, pts_fire, &ctx);
-                CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
+                if (need_timer) {
+                    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
+                    s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
+                        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
+                        0, 0, 0, pts_fire, &ctx);
+                    CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
+                }
             }
 
             return event;
