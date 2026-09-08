@@ -1,103 +1,92 @@
-# AGENTS.md — TrackPoint Daemon for macOS
+# AGENTS.md — TrackPointD for macOS
 
-## Project Overview
+## Scope
 
-Single-file macOS menu bar daemon (`trackpointd.m`) that makes the ThinkPad TrackPoint Keyboard II behave like it does on Windows. Compiled with Clang into a `.app` bundle and registered as a Login Item.
+Single-file Objective-C menu bar app for the ThinkPad TrackPoint Keyboard II.
+Keep it dependency-free and compatible with macOS 12+.
+
+Supported hardware only:
+
+- VID `0x17EF`, USB receiver PID `0x60EE`
+- VID `0x17EF`, Bluetooth LE PID `0x60E1`
+
+Do not broaden matching to every Lenovo device.
 
 ## Architecture
 
-```
-IOHIDManager ──► device added/removed callbacks
-                     │
-                     ▼
-              set_tap_enabled(true/false)
-                     │
-                     ▼
-         CGEventTap (kCGHIDEventTap, unified_callback)
-              │            │             │
-        key remap     middle-btn      pointer scaling
-       (F18, Cmd↔Opt)  scroll mode   + sigmoid accel
+```text
+IOHIDManager (exact VID/PID)
+  ├─ IOHIDDeviceSetReport → speed, Fn Lock, Preferred Scrolling
+  ├─ native input reports → wheel, deferred middle click, Lenovo hotkeys/F12
+  └─ one queue per device → origin confirmation
+
+hidutil --matching → device-only modifier/F18 remaps
+
+one kCGHIDEventTap → compatibility scroll fallback, software speed fallback, PTS
 ```
 
-All event interception happens in a **single** `CGEventTap` at `kCGHIDEventTap` (earliest pipeline level, before the cursor moves). This is intentional — using multiple taps at different levels causes state desync and cursor freeze.
+## Protocol contract
 
-## Key Decisions
+| Transport | Config report |
+|---|---|
+| USB `60EE` | Feature `0x13`, 8 bytes: `13 command value 00 00 00 00 00` |
+| BLE `60E1` | Output `0x18`, 3 bytes: `18 command value` |
 
-### Single unified tap at kCGHIDEventTap
-Earlier versions used separate taps for scrolling vs. pointer scaling. This caused the cursor to freeze after releasing the middle button because move events stopped reaching one of the taps while `s_middleDown` was true. Merging all handlers into one tap fixed it.
+- `0x02`: speed 1–9
+- `0x05`: Fn Lock, 0/1
+- `0x09`: Preferred Scrolling, 0/1
+- Native wheel input uses report ID `0x16` (22 decimal) on both USB and BLE.
+- Hotkey input `0x05` is 2 bytes on USB and 3 bytes on BLE; BLE native middle
+  input `0x15` is 9 bytes. Validate exact lengths and the embedded report ID.
 
-### s_middleDown state
-Middle button state is tracked via global `s_middleDown`. `CGEventSourceButtonState` was tried but doesn't work reliably for BLE keyboards — the Lenovo keyboard's button state is not reflected in `kCGEventSourceStateHIDSystemState`. Stick with `s_middleDown`.
+Never send `01 03`; that is for an older Compact keyboard and breaks Keyboard
+II Fn+Esc behavior. Do not add undocumented initialization packets without real
+hardware evidence.
 
-### Natural scroll detection
-`[[NSUserDefaults standardUserDefaults] objectForKey:@"com.apple.swipescrolldirection"]`
-Returns `nil` when the key has never been set — macOS default is natural scroll **ON**, so `nil` must be treated as `true`. Using `boolForKey:` (returns `false` for absent keys) gives the wrong default.
+## Invariants
 
-### Scroll direction sign
-`CGEventCreateScrollWheelEvent` positive `wheel1` = content scrolls down. `dy < 0` when stick moves up (natural up). So: natural scroll OFF → `sign = 1`, natural scroll ON → `sign = -1`.
+- Hardware speed and software speed must never multiply. Software scaling is a
+  fallback only when the HID setting fails.
+- Native middle-down is held. A wheel report marks scrolling; a middle-up with
+  no scroll emits one downstream middle click.
+- BLE already emits a standard vertical wheel event. Do not synthesize its raw
+  vertical value again; use the vendor report only for horizontal scrolling.
+- Synthetic clicks/scrolls go to `kCGSessionEventTap`, downstream of the HID
+  tap. Never post them back to `kCGHIDEventTap` and recurse.
+- Unknown event origin fails closed. The one exception is an already-consumed,
+  exact-device compatibility middle gesture: swallow unattributed moves until
+  its release rather than leaking an orphan drag to applications.
+- Each physical IOHID device owns its queue, report buffer, and timestamps.
+- Cancel and release every PTS timer on replacement, disconnect, timeout, and
+  termination.
+- Do not write global mouse defaults or global acceleration properties.
+- Do not clear global `UserKeyMapping`; always use exact `hidutil --matching`.
+- Treat absent `com.apple.swipescrolldirection` as natural scrolling enabled.
 
-### Acceleration curve
-`accel = 1.0 + 1.5 * (1.0 - exp(-speed / 3.0))` — sigmoid shape, 1.0x at rest, ~2.5x at high speed. Applied on top of the pointer sensitivity factor.
+## Windows parity boundaries
 
-### pollAccess timer
-The accessibility permission poller (`pollAccess:`) must call `try_create_event_tap()` **directly** before calling `[self refresh]`. If `self.accessTimer` is set to `nil` first and then `refresh` is called, the refresh method's guard `accessible && self.accessTimer == nil && s_tap == NULL` will be false and the tap never gets created.
+Real Keyboard II Windows settings are hardware speed, Preferred Scrolling, and
+F12 user action. Fn Lock is firmware. Modifier swaps, F18, natural direction,
+scroll-speed tuning, and legacy Press-to-Select are macOS additions. Do not call
+the old sigmoid curve or Keyboard II Press-to-Select “Windows parity.”
 
-### Accessibility permission resets on recompile
-`codesign` with a new ad-hoc signature invalidates the TCC entry. `tccutil reset Accessibility com.user.trackpointd` is called automatically by `install.sh`. The user must re-grant in **System Settings → Privacy & Security → Accessibility**.
-
-## File Layout
-
-```
-trackpoint/
-├── trackpointd.m     # Full source (Objective-C, single file)
-├── install.sh        # Compile → bundle → Login Item → launch
-├── uninstall.sh      # Remove Login Item, kill process
-├── TrackPointD.icns  # Menu bar icon source
-├── README.md
-└── AGENTS.md         # This file
-```
-
-## Building
+## Build and verify
 
 ```bash
-bash install.sh
+clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
+  -o /tmp/trackpointd trackpointd.m \
+  -framework Cocoa -framework ApplicationServices -framework IOKit -lm
+/tmp/trackpointd --self-test
+bash -n install.sh
+bash -n uninstall.sh
 ```
 
-Manual compile (no bundling):
-```bash
-clang -O2 -fobjc-arc -o /tmp/trackpointd trackpointd.m \
-  -framework Cocoa \
-  -framework ApplicationServices \
-  -framework IOKit \
-  -lm
-```
+The installer must build and verify a staged bundle before replacing the live
+app. Do not reset privacy permissions automatically.
 
-## Debugging
+## Source hygiene
 
-```bash
-tail -f /tmp/trackpointd.log
-```
-
-Key log lines to look for:
-- `[tp] EventTap ON` — tap enabled (ThinkPad connected)
-- `[tp] middle DOWN` — middle button captured correctly
-- `[tp] scroll dy=...` — scroll events firing
-- `[tp] EventTap DISABLED BY TIMEOUT — re-enabling` — tap timed out; auto-re-enabled
-
-If scroll fires but cursor doesn't move after release: check whether `middle UP (moved=yes)` appears. If not, `OtherMouseUp` is not reaching the tap.
-
-## Settings (persisted via NSUserDefaults)
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `f18Enabled` | Bool | true | Remap Right Option → F18 |
-| `swapModifiers` | Bool | true | Left Opt ↔ Left Cmd via hidutil |
-| `sensitivity` | Int | 5 | Pointer sensitivity 1–9 |
-| `scrollSpeed` | Float | 3.5 | Scroll speed multiplier 1.0–8.0 |
-
-## What NOT to change
-
-- **Do not split the unified tap** into separate taps per feature. This was tried and caused cursor freeze.
-- **Do not use `CGEventSourceButtonState`** to detect middle button state. It doesn't work for BLE.
-- **Do not use `boolForKey:` for natural scroll detection**. Use `objectForKey:` and treat `nil` as `true`.
-- **Do not add `Co-Authored-By:` lines** to commit messages.
+Lenovo's Windows binaries are proprietary. Linux `hid-lenovo.c` is
+GPL-2.0-or-later. Use public protocol facts and independent code; do not paste
+decompiled Lenovo or GPL implementation code into this MIT repository. Do not
+add `Co-Authored-By:` lines to commits.

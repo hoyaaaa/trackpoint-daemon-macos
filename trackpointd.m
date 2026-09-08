@@ -1,12 +1,11 @@
 /*
  * trackpointd.m — ThinkPad TrackPoint macOS menu bar app
  *
- * Key remap: hidutil (kernel level) — Left Opt <-> Left Cmd swap
+ * Key remap: per-device hidutil — modifier swap and Right Option -> F18
  * Unified CGEventTap at kCGHIDEventTap:
- *   - Right Option → F18
  *   - Middle button → scroll (with accumulator + threshold)
- *   - Pointer sensitivity delta scaling (BLE-compatible)
- * Detection: IOHIDManager (ThinkPad BLE connect/disconnect)
+ *   - Software sensitivity fallback and legacy press-to-select
+ * Detection/config: IOHIDManager, exact TrackPoint Keyboard II USB/BLE IDs
  *
  * Compile:
  *   clang -O2 -fobjc-arc -o trackpointd trackpointd.m \
@@ -16,26 +15,36 @@
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <IOKit/hid/IOHIDManager.h>
-#import <IOKit/hidsystem/IOHIDLib.h>
-#import <IOKit/hidsystem/IOHIDParameter.h>
 #import <math.h>
 #import <mach/mach_time.h>
+#import <assert.h>
+#import <float.h>
 
 /* ── Config ───────────────────────────────────────────────────── */
 #define TP_SENSITIVITY_DEFAULT  5   /* 1-9 scale, 5 = neutral */
 #define SCROLL_SPEED            3.5
 #define SCROLL_THRESHOLD        0.8
 #define LENOVO_VID              0x17EF
+#define TP_USB_PID              0x60EE
+#define TP_BLE_PID              0x60E1
 /* ─────────────────────────────────────────────────────────────── */
 
 #define HID_LEFT_OPTION   "0x7000000E2"
 #define HID_LEFT_CMD      "0x7000000E3"
+#define HID_RIGHT_OPTION  "0x7000000E6"
+#define HID_F18           "0x70000006D"
 
 #define PREF_SENSITIVITY  @"tpSensitivity"
 #define PREF_F18          @"tpF18Enabled"
 #define PREF_SWAP         @"tpSwapEnabled"
 #define PREF_SCROLL_SPEED @"tpScrollSpeed"
 #define PREF_PTS          @"tpPtsEnabled"
+#define PREF_SCROLL       @"tpPreferredScroll"
+#define PREF_FN_LOCK      @"tpFnLock"
+#define PREF_F12_MODE     @"tpF12Mode"
+#define PREF_F12_URL      @"tpF12URL"
+#define PREF_F12_TEXT     @"tpF12Text"
+#define PREF_F12_FILES    @"tpF12Files"
 
 /* Press-to-select thresholds */
 #define PTS_MAX_DURATION  0.25  /* max tap duration (seconds) */
@@ -45,30 +54,41 @@
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
 static CFMachPortRef     s_tap        = NULL;   /* unified event tap */
-static int               s_tpCount    = 0;
+static CFRunLoopSourceRef s_tapSource = NULL;
 static bool              s_middleDown = false;
 static bool              s_hasMoved   = false;
 static CGPoint           s_lastPos    = {0, 0};
-static CFMutableArrayRef s_tp_devices = NULL;  /* retained ThinkPad device refs for queue retry */
+static uint64_t          s_lastMiddleClickTime = 0;
 
-static bool    s_f18Enabled  = false;
-static bool    s_swapEnabled = false;
+static bool    s_f18Enabled  = true;
+static bool    s_swapEnabled = true;
 static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
 static double  s_scrollSpeed = SCROLL_SPEED;
+static bool    s_preferredScroll = true;
+static bool    s_fnLock = false;
+static bool    s_hardwareSensitivity = false;
 static bool    s_naturalScroll = false;
 static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
-static CGRect  s_displayBounds;
-
-/* Per-device filtering via IOHIDQueue polling */
-static IOHIDQueueRef s_tp_queue = NULL;     /* X/Y element queue for ThinkPad pointing device */
-static bool          s_tp_queue_ok = false; /* queue confirmed working (got at least one value) */
-static uint64_t      s_last_tp_time = 0;   /* mach_absolute_time of last fresh ThinkPad HID value */
 static NSTimer      *s_imTimer = nil;       /* Input Monitoring permission poll timer */
+static IOHIDManagerRef s_hidManager = NULL;
+
+typedef NS_ENUM(NSInteger, TPF12Mode) {
+    TPF12Disabled = 0,
+    TPF12OpenFiles = 1,
+    TPF12OpenURL = 2,
+    TPF12TypeText = 3,
+};
+
+static TPF12Mode s_f12Mode = TPF12OpenURL;
+static NSString *s_f12URL = @"https://support.lenovo.com/accessories/trackpoint_keyboard";
+static NSString *s_f12Text = @"";
+static NSArray<NSString *> *s_f12Files = @[];
 
 /* If a fresh ThinkPad HID value was seen within this window, treat event as ThinkPad.
  * Bridges the gap when queue is drained on event N and event N+1 arrives before next HID report. */
 #define TP_RECENCY_NS  50000000ULL   /* 50ms */
+#define NATIVE_DUP_NS  15000000ULL   /* native report vs. compatibility event */
 
 /* Press-to-select state */
 static bool              s_ptsEnabled    = false;
@@ -79,6 +99,36 @@ static CFAbsoluteTime    s_pts_startTime = 0;
 static CGPoint           s_pts_pos       = {0, 0};
 static CFRunLoopTimerRef s_pts_timer     = NULL;
 
+@interface TPHIDDevice : NSObject {
+@public
+    IOHIDDeviceRef device;
+    IOHIDQueueRef queue;
+    uint8_t reportBuffer[64];
+    bool queueOK;
+    uint64_t lastPointerTime;
+    uint64_t lastMiddleButtonTime;
+    uint64_t lastNativeScrollTime;
+    uint64_t lastNativeMiddleTime;
+    uint16_t lastHotkey;
+    bool nativeMiddleDown;
+    bool nativeScrolled;
+    bool rawMiddleDown;
+    bool opened;
+    bool scheduled;
+    bool removed;
+}
+- (instancetype)initWithDevice:(IOHIDDeviceRef)hidDevice;
+- (void)buildQueue;
+- (void)detachForRemoval;
+- (void)resetAfterWake;
+@end
+
+static NSMutableArray<TPHIDDevice *> *s_tpDevices;
+
+static int tp_count(void) {
+    return (int)s_tpDevices.count;
+}
+
 /* sensitivity 1-9 -> scale factor via exponential curve
    1 -> ~0.37x, 5 -> 1.0x, 9 -> ~2.72x */
 static double sensitivity_factor(void) {
@@ -87,24 +137,363 @@ static double sensitivity_factor(void) {
 
 static void try_create_event_tap(void);
 static void try_build_queue_for_devices(void);
-static void disable_acceleration(void);
 static void setup_hid(void);
 static void apply_key_remap(void);
+static void apply_hardware_settings(void);
+static void cancel_pts(void);
+static void reset_gesture_state(void);
+static void reset_compatibility_middle(void);
+static NSURL *validated_http_url(NSString *value);
+static void run_f12_action(void);
+static void handle_hotkey(uint16_t usage);
+static void post_middle_click(CGPoint point);
+static uint64_t elapsed_ns(uint64_t now, uint64_t then);
+static void native_middle_changed(TPHIDDevice *ctx, bool down);
+
+typedef struct {
+    IOHIDReportType type;
+    uint8_t reportID;
+} TPReportSpec;
+
+static bool report_spec_for_pid(int productID, TPReportSpec *spec) {
+    if (productID == TP_USB_PID) {
+        spec->type = kIOHIDReportTypeFeature;
+        spec->reportID = 0x13;
+        return true;
+    }
+    if (productID == TP_BLE_PID) {
+        spec->type = kIOHIDReportTypeOutput;
+        spec->reportID = 0x18;
+        return true;
+    }
+    return false;
+}
+
+static bool build_config_report(int productID, uint8_t command, uint8_t value,
+                                TPReportSpec *spec, uint8_t report[8],
+                                CFIndex *reportLength) {
+    if (!report_spec_for_pid(productID, spec)) return false;
+    *reportLength = productID == TP_USB_PID ? 8 : 3;
+    memset(report, 0, 8);
+    report[0] = spec->reportID;
+    report[1] = command;
+    report[2] = value;
+    return true;
+}
+
+static int device_number(IOHIDDeviceRef dev, CFStringRef key) {
+    CFTypeRef value = IOHIDDeviceGetProperty(dev, key);
+    int number = 0;
+    if (value && CFGetTypeID(value) == CFNumberGetTypeID())
+        CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &number);
+    return number;
+}
+
+static bool is_trackpoint_keyboard_ii(IOHIDDeviceRef dev) {
+    int vid = device_number(dev, CFSTR(kIOHIDVendorIDKey));
+    int pid = device_number(dev, CFSTR(kIOHIDProductIDKey));
+    return vid == LENOVO_VID && (pid == TP_USB_PID || pid == TP_BLE_PID);
+}
+
+static bool send_config_command(IOHIDDeviceRef dev, uint8_t command, uint8_t value) {
+    TPReportSpec spec;
+    int pid = device_number(dev, CFSTR(kIOHIDProductIDKey));
+    uint8_t report[8];
+    CFIndex reportLength;
+    if (!build_config_report(pid, command, value, &spec, report, &reportLength))
+        return false;
+    IOReturn ret = IOHIDDeviceSetReport(dev, spec.type, spec.reportID,
+                                         report, reportLength);
+    LOG("HID config pid=%04X report=%02X cmd=%02X value=%u: 0x%08X",
+        (unsigned int)pid, spec.reportID, command, value, (unsigned int)ret);
+    return ret == kIOReturnSuccess;
+}
+
+static CFIndex input_payload_offset(uint32_t reportID, const uint8_t *report,
+                                    CFIndex reportLength,
+                                    CFIndex expectedLength) {
+    if (!report || reportID > UINT8_MAX || reportLength != expectedLength ||
+        report[0] != (uint8_t)reportID)
+        return -1;
+    return 1;
+}
+
+static bool decode_hotkey_report(int pid, uint32_t reportID,
+                                 const uint8_t *report, CFIndex reportLength,
+                                 uint16_t *usage) {
+    if (reportID != 0x05) return false;
+    CFIndex expectedLength;
+    if (pid == TP_USB_PID) expectedLength = 2;
+    else if (pid == TP_BLE_PID) expectedLength = 3;
+    else return false;
+    CFIndex offset = input_payload_offset(reportID, report, reportLength,
+                                          expectedLength);
+    if (offset < 0) return false;
+    *usage = report[offset];
+    return true;
+}
+
+static bool decode_wheel_report(uint32_t reportID, const uint8_t *report,
+                                CFIndex reportLength, int8_t *horizontal,
+                                int8_t *vertical) {
+    /* Both transports use wire report ID 0x16 (22 decimal). */
+    if (reportID != 0x16) return false;
+    CFIndex offset = input_payload_offset(reportID, report, reportLength, 3);
+    if (offset < 0 || reportLength - offset < 2) return false;
+    *horizontal = (int8_t)report[offset];
+    *vertical = (int8_t)report[offset + 1];
+    return true;
+}
+
+static bool decode_middle_report(uint32_t reportID, const uint8_t *report,
+                                 CFIndex reportLength, bool *down) {
+    if (reportID != 0x15) return false;
+    CFIndex offset = input_payload_offset(reportID, report, reportLength, 9);
+    if (offset < 0 || reportLength - offset < 2) return false;
+    *down = (report[offset + 1] & 0x04) != 0;
+    return true;
+}
+
+static void hid_report(void *context, IOReturn result, void *sender,
+                       IOHIDReportType type, uint32_t reportID,
+                       uint8_t *report, CFIndex reportLength) {
+    (void)sender;
+    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput) return;
+    TPHIDDevice *ctx = (__bridge TPHIDDevice *)context;
+
+    /* Report 5 carries a Lenovo hotkey usage (second byte is padding on BLE). */
+    if (reportID == 0x05) {
+        uint16_t usage;
+        int pid = device_number(ctx->device, CFSTR(kIOHIDProductIDKey));
+        if (!decode_hotkey_report(pid, reportID, report, reportLength, &usage))
+            return;
+        if (usage == 0) {
+            ctx->lastHotkey = 0;
+        } else if (usage != ctx->lastHotkey) {
+            ctx->lastHotkey = usage;
+            handle_hotkey(usage);
+        }
+        return;
+    }
+
+    /* Native Preferred Scrolling report: horizontal byte, then vertical byte. */
+    int8_t horizontal, vertical;
+    if (s_preferredScroll && decode_wheel_report(reportID, report, reportLength,
+                                                 &horizontal, &vertical)) {
+        if (horizontal == 0 && vertical == 0) return;
+        bool isBLE = device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID;
+        int sign = s_naturalScroll ? -1 : 1;
+        int32_t verticalPixels = isBLE ? 0 :
+            (int32_t)lrint((double)vertical * s_scrollSpeed * sign);
+        int32_t horizontalPixels =
+            (int32_t)lrint((double)horizontal * s_scrollSpeed * sign);
+        /* BLE also emits a standard vertical wheel report. Reusing that avoids
+         * double scrolling; the vendor report is still needed for horizontal. */
+        if (verticalPixels != 0 || horizontalPixels != 0) {
+            CGEventRef scroll = CGEventCreateScrollWheelEvent(NULL,
+                kCGScrollEventUnitPixel, 2, verticalPixels, horizontalPixels);
+            if (scroll) {
+                CGEventPost(kCGSessionEventTap, scroll);
+                CFRelease(scroll);
+            }
+        }
+        ctx->lastNativeScrollTime = mach_absolute_time();
+        ctx->nativeScrolled = true;
+        s_hasMoved = true;
+        return;
+    }
+
+    /* BLE native middle-button report (usage 4 in report 0x15). */
+    bool down;
+    if (s_preferredScroll &&
+        decode_middle_report(reportID, report, reportLength, &down)) {
+        native_middle_changed(ctx, down);
+    }
+}
+
+static void hid_value(void *context, IOReturn result, void *sender,
+                      IOHIDValueRef value) {
+    (void)sender;
+    if (result != kIOReturnSuccess) return;
+    IOHIDElementRef element = IOHIDValueGetElement(value);
+    if (IOHIDElementGetUsagePage(element) == 0xFFA0 &&
+        IOHIDElementGetUsage(element) == 0xFB) {
+        TPHIDDevice *ctx = (__bridge TPHIDDevice *)context;
+        if (s_preferredScroll)
+            native_middle_changed(ctx, IOHIDValueGetIntegerValue(value) != 0);
+    }
+}
+
+static void native_middle_changed(TPHIDDevice *ctx, bool down) {
+    if (down && !ctx->nativeMiddleDown) {
+        /* A CG compatibility event can arrive before this raw report. */
+        reset_compatibility_middle();
+        cancel_pts();
+        s_pts_tracking = false;
+        s_pts_inhibit = false;
+        ctx->nativeMiddleDown = true;
+        ctx->nativeScrolled = false;
+        ctx->lastNativeMiddleTime = mach_absolute_time();
+    } else if (!down && ctx->nativeMiddleDown) {
+        ctx->nativeMiddleDown = false;
+        ctx->lastNativeMiddleTime = mach_absolute_time();
+        if (!ctx->nativeScrolled && s_preferredScroll) {
+            CGEventRef current = CGEventCreate(NULL);
+            CGPoint point = current ? CGEventGetLocation(current) : CGPointZero;
+            if (current) CFRelease(current);
+            post_middle_click(point);
+        }
+    }
+}
+
+@implementation TPHIDDevice
+
+- (instancetype)initWithDevice:(IOHIDDeviceRef)hidDevice {
+    self = [super init];
+    if (!self) return nil;
+    device = (IOHIDDeviceRef)CFRetain(hidDevice);
+    queue = NULL;
+    queueOK = false;
+    lastPointerTime = 0;
+    lastMiddleButtonTime = 0;
+    lastNativeScrollTime = 0;
+    lastNativeMiddleTime = 0;
+    lastHotkey = 0;
+    nativeMiddleDown = false;
+    nativeScrolled = false;
+    rawMiddleDown = false;
+    opened = false;
+    scheduled = false;
+    removed = false;
+    memset(reportBuffer, 0, sizeof(reportBuffer));
+    return self;
+}
+
+- (void)buildQueue {
+    if (queue) return;
+    if (!opened) {
+        IOReturn openRet = IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone);
+        LOG("IOHIDDeviceOpen: 0x%08X (%s)", (unsigned int)openRet,
+            openRet == kIOReturnSuccess ? "ok" :
+            openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
+        if (openRet != kIOReturnSuccess) return;
+        opened = true;
+    }
+    if (!scheduled) {
+        IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
+            (CFIndex)sizeof(reportBuffer), hid_report, (__bridge void *)self);
+        IOHIDDeviceRegisterInputValueCallback(device, hid_value, (__bridge void *)self);
+        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+        scheduled = true;
+    }
+
+    CFArrayRef elems = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
+    CFIndex total = elems ? CFArrayGetCount(elems) : 0;
+    if (total == 0) {
+        if (elems) CFRelease(elems);
+        return;
+    }
+
+    IOHIDQueueRef newQueue = IOHIDQueueCreate(kCFAllocatorDefault, device, 64,
+                                               kIOHIDOptionsTypeNone);
+    int added = 0;
+    if (newQueue) {
+        for (CFIndex i = 0; i < total; i++) {
+            IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
+            uint32_t page = IOHIDElementGetUsagePage(elem);
+            uint32_t usage = IOHIDElementGetUsage(elem);
+            if ((page == kHIDPage_GenericDesktop &&
+                 (usage == kHIDUsage_GD_X || usage == kHIDUsage_GD_Y)) ||
+                (page == kHIDPage_Button && usage == 3)) {
+                IOHIDQueueAddElement(newQueue, elem);
+                added++;
+            }
+        }
+    }
+    if (elems) CFRelease(elems);
+    if (newQueue && added > 0) {
+        IOHIDQueueStart(newQueue);
+        queue = newQueue;
+        LOG("HID queue created with %d pointer elements", added);
+    } else if (newQueue) {
+        CFRelease(newQueue);
+    }
+}
+
+- (void)detachForRemoval {
+    removed = true;
+    if (queue) {
+        IOHIDQueueStop(queue);
+        CFRelease(queue);
+        queue = NULL;
+    }
+    if (device && scheduled) {
+        IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
+            (CFIndex)sizeof(reportBuffer), NULL, (__bridge void *)self);
+        IOHIDDeviceRegisterInputValueCallback(device, NULL, (__bridge void *)self);
+        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(),
+                                          kCFRunLoopCommonModes);
+        scheduled = false;
+    }
+    /* Closing an already-removed IOHIDDevice is unsafe on some macOS releases. */
+    opened = false;
+}
+
+- (void)resetAfterWake {
+    lastPointerTime = 0;
+    lastMiddleButtonTime = 0;
+    lastNativeScrollTime = 0;
+    lastNativeMiddleTime = 0;
+    lastHotkey = 0;
+    if (!queue) return;
+    IOHIDQueueStop(queue);
+    IOHIDValueRef stale;
+    while ((stale = IOHIDQueueCopyNextValueWithTimeout(queue, 0)) != NULL)
+        CFRelease(stale);
+    IOHIDQueueStart(queue);
+}
+
+- (void)dealloc {
+    if (queue) {
+        IOHIDQueueStop(queue);
+        CFRelease(queue);
+    }
+    if (device) {
+        if (!removed) {
+            IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
+                (CFIndex)sizeof(reportBuffer), NULL, (__bridge void *)self);
+            IOHIDDeviceRegisterInputValueCallback(device, NULL, (__bridge void *)self);
+            if (scheduled)
+                IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(),
+                                                  kCFRunLoopCommonModes);
+            if (opened) IOHIDDeviceClose(device, kIOHIDOptionsTypeNone);
+        }
+        CFRelease(device);
+    }
+}
+
+@end
 
 /* ══════════════════════════════════════════════════════════════
    Settings Window
    ══════════════════════════════════════════════════════════════ */
-@interface SettingsWindowController : NSWindowController
+@interface SettingsWindowController : NSWindowController <NSTextFieldDelegate>
 @property (strong) NSTextField *keyboardStatus;
 @property (strong) NSTextField *accessStatus;
 @property (strong) NSButton    *f18Check;
 @property (strong) NSButton    *swapCheck;
+@property (strong) NSButton    *fnLockCheck;
+@property (strong) NSButton    *preferredCheck;
 @property (strong) NSButton    *ptsCheck;
 @property (strong) NSSlider    *slider;
 @property (strong) NSTextField *valueLabel;
 @property (strong) NSSlider    *scrollSlider;
 @property (strong) NSTextField *scrollValueLabel;
 @property (strong) NSButton    *grantBtn;
+@property (strong) NSPopUpButton *f12Popup;
+@property (strong) NSTextField *f12Value;
+@property (strong) NSButton    *f12ChooseBtn;
+@property (strong) NSTextField *f12Warning;
 - (void)syncState;
 @end
 
@@ -114,11 +503,11 @@ static SettingsWindowController *g_settings = nil;
 
 - (instancetype)init {
     NSWindow *win = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 360, 470)
+        initWithContentRect:NSMakeRect(0, 0, 380, 650)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered
         defer:NO];
-    win.title = @"TrackPoint Settings";
+    win.title = @"TrackPoint Keyboard II";
     win.releasedWhenClosed = NO;
     self = [super initWithWindow:win];
     if (!self) return nil;
@@ -128,8 +517,8 @@ static SettingsWindowController *g_settings = nil;
 
 - (void)buildUI {
     NSView *cv = self.window.contentView;
-    CGFloat W = 360, pad = 20;
-    CGFloat y = 430;
+    CGFloat W = 380, pad = 20;
+    CGFloat y = 610;
 
     /* ── Status ── */
     NSTextField *sh = [NSTextField labelWithString:@"Status"];
@@ -180,6 +569,12 @@ static SettingsWindowController *g_settings = nil;
                       target:self action:@selector(toggleSwap:)];
     self.swapCheck.frame = NSMakeRect(pad + 8, y, W - pad*2 - 8, 20);
     [cv addSubview:self.swapCheck];
+    y -= 24;
+
+    self.fnLockCheck = [NSButton checkboxWithTitle:@"Fn Lock (F1–F12 standard keys)"
+                       target:self action:@selector(toggleFnLock:)];
+    self.fnLockCheck.frame = NSMakeRect(pad + 8, y, W - pad*2 - 8, 20);
+    [cv addSubview:self.fnLockCheck];
     y -= 16;
 
     /* ── Separator ── */
@@ -214,7 +609,7 @@ static SettingsWindowController *g_settings = nil;
     self.slider.numberOfTickMarks = 9;
     self.slider.allowsTickMarkValuesOnly = YES;
     self.slider.integerValue = s_sensitivity;
-    self.slider.continuous = YES;
+    self.slider.continuous = NO;
     self.slider.target = self;
     self.slider.action = @selector(sliderChanged:);
     [cv addSubview:self.slider];
@@ -287,29 +682,86 @@ static SettingsWindowController *g_settings = nil;
     [cv addSubview:tph];
     y -= 26;
 
-    self.ptsCheck = [NSButton checkboxWithTitle:@"Press-to-Select (tap stick → left click)"
+    self.preferredCheck = [NSButton checkboxWithTitle:@"ThinkPad Preferred Scrolling"
+                           target:self action:@selector(togglePreferredScroll:)];
+    self.preferredCheck.frame = NSMakeRect(pad + 8, y, W - pad*2 - 8, 20);
+    [cv addSubview:self.preferredCheck];
+    y -= 24;
+
+    self.ptsCheck = [NSButton checkboxWithTitle:@"Legacy Press-to-Select (tap stick → left click)"
                      target:self action:@selector(togglePts:)];
     self.ptsCheck.frame = NSMakeRect(pad + 8, y, W - pad*2 - 8, 20);
     [cv addSubview:self.ptsCheck];
+    y -= 18;
+
+    NSBox *sep5 = [[NSBox alloc] initWithFrame:NSMakeRect(pad, y, W - pad*2, 1)];
+    sep5.boxType = NSBoxSeparator;
+    [cv addSubview:sep5];
+    y -= 18;
+
+    NSTextField *f12h = [NSTextField labelWithString:@"★ key (Fn+F12)"];
+    f12h.font = [NSFont boldSystemFontOfSize:12];
+    f12h.frame = NSMakeRect(pad, y, W - pad*2, 18);
+    [cv addSubview:f12h];
+    y -= 28;
+
+    self.f12Popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(pad + 8, y, 160, 24)];
+    [self.f12Popup addItemsWithTitles:@[@"Disabled", @"Open files/apps",
+                                        @"Open web site", @"Enter text"]];
+    self.f12Popup.target = self;
+    self.f12Popup.action = @selector(f12ModeChanged:);
+    [cv addSubview:self.f12Popup];
+
+    self.f12ChooseBtn = [NSButton buttonWithTitle:@"Choose…" target:self
+                                            action:@selector(chooseF12Files:)];
+    self.f12ChooseBtn.bezelStyle = NSBezelStyleRounded;
+    self.f12ChooseBtn.frame = NSMakeRect(W - pad - 90, y, 82, 24);
+    [cv addSubview:self.f12ChooseBtn];
+    y -= 30;
+
+    self.f12Value = [[NSTextField alloc] initWithFrame:NSMakeRect(pad + 8, y,
+                                                                  W - pad*2 - 16, 24)];
+    self.f12Value.selectable = YES;
+    self.f12Value.delegate = self;
+    self.f12Value.target = self;
+    self.f12Value.action = @selector(f12ValueChanged:);
+    [cv addSubview:self.f12Value];
+    y -= 28;
+
+    self.f12Warning = [NSTextField wrappingLabelWithString:
+        @"Do not store passwords or personal information here."];
+    self.f12Warning.font = [NSFont systemFontOfSize:10];
+    self.f12Warning.textColor = [NSColor systemOrangeColor];
+    self.f12Warning.frame = NSMakeRect(pad + 8, y, W - pad*2 - 16, 28);
+    [cv addSubview:self.f12Warning];
 
     [self syncState];
 }
 
 - (void)syncState {
     BOOL accessible = AXIsProcessTrusted();
-    BOOL connected  = s_tpCount > 0;
+    BOOL connected  = tp_count() > 0;
 
-    self.keyboardStatus.stringValue = connected  ? @"Keyboard: Connected"       : @"Keyboard: Disconnected";
+    self.keyboardStatus.stringValue = connected
+        ? [NSString stringWithFormat:@"Keyboard: Connected (%@ sensitivity)",
+            s_hardwareSensitivity ? @"hardware" : @"software fallback"]
+        : @"Keyboard: Disconnected";
     self.keyboardStatus.textColor   = connected  ? [NSColor systemGreenColor]   : [NSColor secondaryLabelColor];
 
-    self.accessStatus.stringValue   = accessible ? @"Accessibility: Granted"    : @"Accessibility: Not Granted";
-    self.accessStatus.textColor     = accessible ? [NSColor systemGreenColor]   : [NSColor systemOrangeColor];
+    BOOL inputAllowed = CGPreflightListenEventAccess();
+    self.accessStatus.stringValue = [NSString stringWithFormat:
+        @"Permissions: Accessibility %@ · Input Monitoring %@",
+        accessible ? @"✓" : @"✗", inputAllowed ? @"✓" : @"✗"];
+    self.accessStatus.textColor = (accessible && inputAllowed)
+        ? [NSColor systemGreenColor] : [NSColor systemOrangeColor];
 
-    self.grantBtn.hidden   = accessible;
-    self.swapCheck.enabled = connected;
-
+    self.grantBtn.hidden = accessible && inputAllowed;
+    self.grantBtn.title = !accessible ? @"Grant Accessibility Permission…"
+                                      : @"Grant Input Monitoring Permission…";
     self.f18Check.state  = s_f18Enabled  ? NSControlStateValueOn : NSControlStateValueOff;
     self.swapCheck.state = s_swapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.fnLockCheck.state = s_fnLock ? NSControlStateValueOn : NSControlStateValueOff;
+    self.preferredCheck.state = s_preferredScroll ? NSControlStateValueOn : NSControlStateValueOff;
     self.ptsCheck.state  = s_ptsEnabled  ? NSControlStateValueOn : NSControlStateValueOff;
 
     self.slider.integerValue = s_sensitivity;
@@ -317,6 +769,9 @@ static SettingsWindowController *g_settings = nil;
 
     self.scrollSlider.doubleValue = s_scrollSpeed;
     self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", s_scrollSpeed];
+
+    [self.f12Popup selectItemAtIndex:s_f12Mode];
+    [self configureF12Controls];
 }
 
 - (void)sliderChanged:(NSSlider *)slider {
@@ -324,7 +779,10 @@ static SettingsWindowController *g_settings = nil;
     s_sensitivity = val;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", val];
     [[NSUserDefaults standardUserDefaults] setInteger:val forKey:PREF_SENSITIVITY];
-    LOG("sensitivity -> %d (factor %.2fx)", val, sensitivity_factor());
+    apply_hardware_settings();
+    [self syncState];
+    LOG("sensitivity -> %d (%s)", val,
+        s_hardwareSensitivity ? "hardware" : "software fallback");
 }
 
 - (void)scrollSliderChanged:(NSSlider *)slider {
@@ -338,6 +796,7 @@ static SettingsWindowController *g_settings = nil;
 - (void)toggleF18:(NSButton *)btn {
     s_f18Enabled = (btn.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:s_f18Enabled forKey:PREF_F18];
+    apply_key_remap();
     LOG("F18 remap: %s", s_f18Enabled ? "ON" : "OFF");
 }
 
@@ -348,20 +807,139 @@ static SettingsWindowController *g_settings = nil;
     LOG("Left Opt<->Cmd swap: %s", s_swapEnabled ? "ON" : "OFF");
 }
 
+- (void)toggleFnLock:(NSButton *)btn {
+    s_fnLock = (btn.state == NSControlStateValueOn);
+    [[NSUserDefaults standardUserDefaults] setBool:s_fnLock forKey:PREF_FN_LOCK];
+    apply_hardware_settings();
+    LOG("Fn Lock: %s", s_fnLock ? "ON" : "OFF");
+}
+
+- (void)togglePreferredScroll:(NSButton *)btn {
+    s_preferredScroll = (btn.state == NSControlStateValueOn);
+    [[NSUserDefaults standardUserDefaults] setBool:s_preferredScroll forKey:PREF_SCROLL];
+    reset_gesture_state();
+    apply_hardware_settings();
+    LOG("Preferred Scrolling: %s", s_preferredScroll ? "ON" : "OFF");
+}
+
 - (void)togglePts:(NSButton *)btn {
     s_ptsEnabled = (btn.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:s_ptsEnabled forKey:PREF_PTS];
     if (!s_ptsEnabled) {
-        if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
+        cancel_pts();
         s_pts_tracking = false; s_pts_inhibit = false;
     }
     LOG("press-to-select: %s", s_ptsEnabled ? "ON" : "OFF");
 }
 
+- (void)configureF12Controls {
+    self.f12ChooseBtn.hidden = s_f12Mode != TPF12OpenFiles;
+    self.f12Value.hidden = s_f12Mode == TPF12Disabled;
+    self.f12Value.editable = s_f12Mode != TPF12OpenFiles;
+    self.f12Warning.hidden = s_f12Mode != TPF12TypeText;
+    self.f12Value.toolTip = nil;
+    self.f12Value.textColor = NSColor.controlTextColor;
+
+    switch (s_f12Mode) {
+        case TPF12OpenFiles: {
+            NSMutableArray<NSString *> *names = [NSMutableArray array];
+            for (NSString *path in s_f12Files)
+                [names addObject:path.lastPathComponent.length ? path.lastPathComponent : path];
+            self.f12Value.stringValue = names.count
+                ? [names componentsJoinedByString:@" · "] : @"No files selected";
+            self.f12Value.toolTip = s_f12Files.count
+                ? [s_f12Files componentsJoinedByString:@"\n"] : nil;
+            self.f12Value.placeholderString = @"Choose up to four files or apps";
+            break;
+        }
+        case TPF12OpenURL:
+            self.f12Value.stringValue = s_f12URL ?: @"";
+            self.f12Value.placeholderString = @"https://example.com";
+            if (self.f12Value.stringValue.length &&
+                !validated_http_url(self.f12Value.stringValue))
+                self.f12Value.textColor = NSColor.systemRedColor;
+            break;
+        case TPF12TypeText:
+            self.f12Value.stringValue = s_f12Text ?: @"";
+            self.f12Value.placeholderString = @"Text to type";
+            break;
+        case TPF12Disabled:
+            self.f12Value.stringValue = @"";
+            break;
+    }
+}
+
+- (void)f12ModeChanged:(NSPopUpButton *)sender {
+    /* Preserve the old mode's in-progress value before repurposing the field. */
+    [self persistF12Value];
+    s_f12Mode = (TPF12Mode)sender.indexOfSelectedItem;
+    [[NSUserDefaults standardUserDefaults] setInteger:s_f12Mode forKey:PREF_F12_MODE];
+    [self configureF12Controls];
+}
+
+- (void)persistF12Value {
+    if (s_f12Mode == TPF12OpenURL) {
+        s_f12URL = self.f12Value.stringValue;
+        [[NSUserDefaults standardUserDefaults] setObject:s_f12URL forKey:PREF_F12_URL];
+    } else if (s_f12Mode == TPF12TypeText) {
+        s_f12Text = self.f12Value.stringValue;
+        [[NSUserDefaults standardUserDefaults] setObject:s_f12Text forKey:PREF_F12_TEXT];
+    }
+}
+
+- (void)f12ValueChanged:(NSTextField *)sender {
+    (void)sender;
+    [self persistF12Value];
+}
+
+- (void)controlTextDidEndEditing:(NSNotification *)notification {
+    if (notification.object == self.f12Value) [self persistF12Value];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    if (notification.object == self.f12Value) {
+        [self persistF12Value];
+        self.f12Value.textColor = s_f12Mode == TPF12OpenURL &&
+            self.f12Value.stringValue.length &&
+            !validated_http_url(self.f12Value.stringValue)
+                ? NSColor.systemRedColor : NSColor.controlTextColor;
+    }
+}
+
+- (void)chooseF12Files:(id)sender {
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = YES;
+    panel.message = @"Choose up to four applications or files";
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+        NSArray<NSURL *> *urls = panel.URLs;
+        NSUInteger count = MIN((NSUInteger)4, urls.count);
+        NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:count];
+        for (NSUInteger i = 0; i < count; i++) {
+            NSString *path = urls[i].path;
+            if (path) [paths addObject:path];
+        }
+        s_f12Files = [paths copy];
+        [[NSUserDefaults standardUserDefaults] setObject:s_f12Files forKey:PREF_F12_FILES];
+        [self configureF12Controls];
+        if (urls.count > 4) {
+            NSAlert *alert = [NSAlert new];
+            alert.messageText = @"Only the first four items were saved.";
+            alert.informativeText = @"The Lenovo F12 action supports up to four files or applications.";
+            [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        }
+    }];
+}
+
 - (void)openAccessibility:(id)sender {
-    [[NSWorkspace sharedWorkspace] openURL:
-        [NSURL URLWithString:
-            @"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
+    (void)sender;
+    NSString *pane = AXIsProcessTrusted() ? @"Privacy_ListenEvent" : @"Privacy_Accessibility";
+    NSString *url = [@"x-apple.systempreferences:com.apple.preference.security?" stringByAppendingString:pane];
+    NSURL *settingsURL = [NSURL URLWithString:url];
+    if (settingsURL) [[NSWorkspace sharedWorkspace] openURL:settingsURL];
 }
 
 @end
@@ -372,8 +950,8 @@ static SettingsWindowController *g_settings = nil;
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSTimer      *accessTimer;
-@property (strong) NSTimer      *imTimer;
 - (void)refresh;
+- (void)openSettings:(id)sender;
 @end
 
 static AppDelegate *g_app = nil;
@@ -394,20 +972,55 @@ static AppDelegate *g_app = nil;
         LOG("Input Monitoring: already granted");
     }
     [self refresh];
-    /* Compute union of all active display bounds for multi-monitor clamping */
-    CGDirectDisplayID displays[8];
-    uint32_t dispCount = 0;
-    CGGetActiveDisplayList(8, displays, &dispCount);
-    s_displayBounds = CGRectZero;
-    for (uint32_t i = 0; i < dispCount; i++)
-        s_displayBounds = CGRectUnion(s_displayBounds, CGDisplayBounds(displays[i]));
     /* key absent = macOS default = natural scroll ON */
     NSNumber *scrollPref = [[NSUserDefaults standardUserDefaults]
         objectForKey:@"com.apple.swipescrolldirection"];
     s_naturalScroll = (scrollPref == nil) ? true : [scrollPref boolValue];
-    disable_acceleration();
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
+        selector:@selector(systemDidWake:) name:NSWorkspaceDidWakeNotification object:nil];
     setup_hid();
     try_create_event_tap();
+}
+
+- (void)systemDidWake:(NSNotification *)notification {
+    (void)notification;
+    reset_gesture_state();
+    for (TPHIDDevice *ctx in s_tpDevices) [ctx resetAfterWake];
+    NSNumber *scrollPref = [[NSUserDefaults standardUserDefaults]
+        objectForKey:@"com.apple.swipescrolldirection"];
+    s_naturalScroll = (scrollPref == nil) ? true : scrollPref.boolValue;
+    try_build_queue_for_devices();
+    apply_key_remap();
+    LOG("settings reapplied after wake");
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    [self.accessTimer invalidate];
+    [s_imTimer invalidate];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
+    cancel_pts();
+    reset_gesture_state();
+
+    /* Reset the per-device mapping property only on this keyboard model. */
+    bool oldF18 = s_f18Enabled, oldSwap = s_swapEnabled;
+    s_f18Enabled = false; s_swapEnabled = false;
+    apply_key_remap();
+    s_f18Enabled = oldF18; s_swapEnabled = oldSwap;
+
+    if (s_tap) CGEventTapEnable(s_tap, false);
+    if (s_tapSource) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), s_tapSource, kCFRunLoopCommonModes);
+        CFRelease(s_tapSource); s_tapSource = NULL;
+    }
+    if (s_tap) { CFRelease(s_tap); s_tap = NULL; }
+    [s_tpDevices removeAllObjects];
+    if (s_hidManager) {
+        IOHIDManagerUnscheduleFromRunLoop(s_hidManager, CFRunLoopGetMain(),
+                                           kCFRunLoopCommonModes);
+        IOHIDManagerClose(s_hidManager, kIOHIDOptionsTypeNone);
+        CFRelease(s_hidManager); s_hidManager = NULL;
+    }
 }
 
 - (void)buildMenu {
@@ -435,9 +1048,10 @@ static AppDelegate *g_app = nil;
 
 - (void)refresh {
     BOOL accessible = AXIsProcessTrusted();
-    BOOL connected  = s_tpCount > 0;
+    BOOL inputAllowed = CGPreflightListenEventAccess();
+    BOOL connected  = tp_count() > 0;
 
-    self.statusItem.button.title = !accessible ? @"TP!" :
+    self.statusItem.button.title = (!accessible || !inputAllowed) ? @"TP!" :
                                     connected   ? @"TP+" : @"TP-";
     [g_settings syncState];
 
@@ -462,13 +1076,14 @@ static AppDelegate *g_app = nil;
     if (CGPreflightListenEventAccess()) {
         LOG("Input Monitoring: granted — building per-device queue");
         [t invalidate]; s_imTimer = nil;
-        /* Retry device open + queue build for all already-connected ThinkPad devices */
         try_build_queue_for_devices();
-        if (!s_tp_queue && s_tp_devices && CFArrayGetCount(s_tp_devices) > 0) {
-            /* Elements not ready yet (BLE) — retry after 2s */
+        BOOL needsRetry = NO;
+        for (TPHIDDevice *ctx in s_tpDevices) needsRetry |= ctx->queue == NULL;
+        if (needsRetry) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{ try_build_queue_for_devices(); });
         }
+        [self refresh];
     }
 }
 
@@ -500,41 +1115,193 @@ static AppDelegate *g_app = nil;
    hidutil — kernel-level key remap
    ══════════════════════════════════════════════════════════════ */
 static void apply_key_remap(void) {
-    BOOL enable = (s_tpCount > 0) && s_swapEnabled;
+    if (tp_count() == 0) return;
 
-    NSString *mapping = enable
-        ? @"{\"UserKeyMapping\":["
-           "{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_OPTION ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_CMD "},"
-           "{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_CMD    ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_OPTION "}"
-           "]}"
-        : @"{\"UserKeyMapping\":[]}";
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    if (s_swapEnabled) {
+        [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_OPTION
+                         ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_CMD "}"];
+        [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_CMD
+                         ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_OPTION "}"];
+    }
+    if (s_f18Enabled) {
+        [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_RIGHT_OPTION
+                         ",\"HIDKeyboardModifierMappingDst\":" HID_F18 "}"];
+    }
+    NSString *mapping = [NSString stringWithFormat:@"{\"UserKeyMapping\":[%@]}",
+                         [items componentsJoinedByString:@","]];
 
-    NSTask *task = [NSTask new];
-    task.launchPath = @"/usr/bin/hidutil";
-    task.arguments  = @[@"property", @"--set", mapping];
-    [task launch];
-    [task waitUntilExit];
-    LOG("hidutil Left Opt<->Left Cmd: %s", enable ? "applied" : "cleared");
+    NSMutableSet<NSNumber *> *products = [NSMutableSet set];
+    for (TPHIDDevice *ctx in s_tpDevices)
+        [products addObject:@(device_number(ctx->device, CFSTR(kIOHIDProductIDKey)))];
+
+    for (NSNumber *product in products) {
+        NSString *match = [NSString stringWithFormat:
+            @"{\"VendorID\":%d,\"ProductID\":%d}", LENOVO_VID, product.intValue];
+        NSTask *task = [NSTask new];
+        task.launchPath = @"/usr/bin/hidutil";
+        task.arguments = @[@"property", @"--matching", match, @"--set", mapping];
+        task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+        task.standardError = [NSFileHandle fileHandleWithNullDevice];
+        [task launch];
+        [task waitUntilExit];
+        LOG("hidutil pid=%04X mappings=%lu: %s", (unsigned int)product.intValue,
+            (unsigned long)items.count, task.terminationStatus == 0 ? "ok" : "failed");
+    }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   Disable mouse acceleration
-   ══════════════════════════════════════════════════════════════ */
-static void disable_acceleration(void) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    io_service_t svc = IOServiceGetMatchingService(
-        kIOMasterPortDefault, IOServiceMatching(kIOHIDSystemClass));
-    if (!svc) return;
-    io_connect_t conn;
-    if (IOServiceOpen(svc, mach_task_self(), kIOHIDParamConnectType, &conn) == KERN_SUCCESS) {
-        IOHIDSetMouseAcceleration(conn, -1.0);
-        IOHIDSetScrollAcceleration(conn, -1.0);
-        IOServiceClose(conn);
-        LOG("acceleration disabled");
+static void apply_hardware_settings(void) {
+    bool sensitivityApplied = false;
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        if (!ctx->opened) continue;
+        sensitivityApplied |= send_config_command(ctx->device, 0x02,
+                                                   (uint8_t)s_sensitivity);
+        send_config_command(ctx->device, 0x05, s_fnLock ? 1 : 0);
+        send_config_command(ctx->device, 0x09, s_preferredScroll ? 1 : 0);
     }
-    IOObjectRelease(svc);
-#pragma clang diagnostic pop
+    s_hardwareSensitivity = sensitivityApplied;
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_settings syncState]; });
+}
+
+static void open_system_settings(NSString *pane) {
+    NSString *url = pane.length
+        ? [@"x-apple.systempreferences:" stringByAppendingString:pane]
+        : @"x-apple.systempreferences:";
+    NSURL *settingsURL = [NSURL URLWithString:url];
+    if (settingsURL) [[NSWorkspace sharedWorkspace] openURL:settingsURL];
+}
+
+static NSURL *validated_http_url(NSString *value) {
+    NSURLComponents *components = [NSURLComponents componentsWithString:value ?: @""];
+    NSString *scheme = components.scheme.lowercaseString;
+    if (!([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) ||
+        components.host.length == 0)
+        return nil;
+    return components.URL;
+}
+
+static void type_text(NSString *text) {
+    NSUInteger length = MIN((NSUInteger)1000, text.length);
+    if (length == 0 || !AXIsProcessTrusted()) return;
+    UniChar *characters = calloc(length, sizeof(UniChar));
+    if (!characters) return;
+    [text getCharacters:characters range:NSMakeRange(0, length)];
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+    if (down && up) {
+        CGEventKeyboardSetUnicodeString(down, length, characters);
+        CGEventKeyboardSetUnicodeString(up, length, characters);
+        CGEventPost(kCGSessionEventTap, down);
+        CGEventPost(kCGSessionEventTap, up);
+    }
+    if (down) CFRelease(down);
+    if (up) CFRelease(up);
+    free(characters);
+}
+
+static void run_f12_action(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        switch (s_f12Mode) {
+            case TPF12OpenFiles:
+                for (NSString *path in s_f12Files) {
+                    if ([[NSFileManager defaultManager] fileExistsAtPath:path])
+                        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
+                }
+                break;
+            case TPF12OpenURL: {
+                NSURL *targetURL = validated_http_url(s_f12URL);
+                if (targetURL) {
+                    [[NSWorkspace sharedWorkspace] openURL:targetURL];
+                } else {
+                    NSBeep();
+                    LOG("F12 URL rejected: only http/https is allowed");
+                }
+                break;
+            }
+            case TPF12TypeText:
+                type_text(s_f12Text ?: @"");
+                break;
+            case TPF12Disabled:
+                break;
+        }
+    });
+}
+
+static void handle_hotkey(uint16_t usage) {
+    LOG("hotkey usage=0x%02X", usage);
+    switch (usage) {
+        case 0xB5: /* Fn-Esc */
+            s_fnLock = !s_fnLock;
+            [[NSUserDefaults standardUserDefaults] setBool:s_fnLock forKey:PREF_FN_LOCK];
+            apply_hardware_settings();
+            break;
+        case 0xB6: /* Fn-F10 */
+            dispatch_async(dispatch_get_main_queue(), ^{ open_system_settings(@"com.apple.BluetoothSettings"); });
+            break;
+        case 0xB7: /* Fn-F11 */
+            dispatch_async(dispatch_get_main_queue(), ^{ [g_app openSettings:nil]; });
+            break;
+        case 0xB8: /* Fn-F12 */
+            run_f12_action();
+            break;
+        case 0xB9: { /* Fn-PrtSc */
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSTask *task = [NSTask new];
+                task.launchPath = @"/usr/sbin/screencapture";
+                task.arguments = @[@"-i"];
+                [task launch];
+            });
+            break;
+        }
+        case 0xBC: /* Fn-F9 */
+            dispatch_async(dispatch_get_main_queue(), ^{ open_system_settings(@""); });
+            break;
+        default:
+            break; /* macOS already handles standard media/brightness usages. */
+    }
+}
+
+static void post_middle_click(CGPoint point) {
+    uint64_t now = mach_absolute_time();
+    if (elapsed_ns(now, s_lastMiddleClickTime) < 100000000ULL) return;
+    s_lastMiddleClickTime = now;
+    CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown,
+                                               point, kCGMouseButtonCenter);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseUp,
+                                             point, kCGMouseButtonCenter);
+    if (down && up) {
+        /* Session-level injection is downstream of our HID tap: no recursion. */
+        CGEventPost(kCGSessionEventTap, down);
+        CGEventPost(kCGSessionEventTap, up);
+    }
+    if (down) CFRelease(down);
+    if (up) CFRelease(up);
+}
+
+static void cancel_pts(void) {
+    if (!s_pts_timer) return;
+    CFRunLoopTimerInvalidate(s_pts_timer);
+    CFRelease(s_pts_timer);
+    s_pts_timer = NULL;
+}
+
+static void reset_gesture_state(void) {
+    cancel_pts();
+    reset_compatibility_middle();
+    s_pts_tracking = false;
+    s_pts_inhibit = false;
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        ctx->nativeMiddleDown = false;
+        ctx->nativeScrolled = false;
+        ctx->rawMiddleDown = false;
+    }
+}
+
+static void reset_compatibility_middle(void) {
+    s_middleDown = false;
+    s_hasMoved = false;
+    s_scrollAccumX = 0.0;
+    s_scrollAccumY = 0.0;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -542,231 +1309,279 @@ static void disable_acceleration(void) {
    ══════════════════════════════════════════════════════════════ */
 static void pts_fire(CFRunLoopTimerRef timer, void *info) {
     (void)info;
-    CFRunLoopTimerInvalidate(timer);
-    s_pts_timer = NULL;
+    if (timer != s_pts_timer) return;
+    cancel_pts();
     if (s_pts_inhibit) {
         /* gesture was too large — stick stopped, clear inhibit, no click */
         s_pts_inhibit = false;
         return;
     }
-    if (!s_pts_tracking) return;
+    if (!s_pts_tracking || !s_ptsEnabled || tp_count() == 0 ||
+        !AXIsProcessTrusted() ||
+        CFAbsoluteTimeGetCurrent() - s_pts_startTime > PTS_MAX_DURATION) {
+        s_pts_tracking = false;
+        return;
+    }
     s_pts_tracking = false;
     CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, s_pts_pos, kCGMouseButtonLeft);
     CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp,   s_pts_pos, kCGMouseButtonLeft);
-    CGEventPost(kCGSessionEventTap, dn);
-    CGEventPost(kCGSessionEventTap, up);
-    CFRelease(dn); CFRelease(up);
+    if (dn && up) {
+        CGEventPost(kCGSessionEventTap, dn);
+        CGEventPost(kCGSessionEventTap, up);
+    }
+    if (dn) CFRelease(dn);
+    if (up) CFRelease(up);
     LOG("press-to-select: click at (%.0f, %.0f)", s_pts_pos.x, s_pts_pos.y);
+}
+
+static void schedule_pts_timer(void) {
+    cancel_pts();
+    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
+    s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
+        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY, 0, 0, 0, pts_fire, &ctx);
+    if (s_pts_timer)
+        CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopCommonModes);
+}
+
+typedef struct {
+    bool fresh;
+    bool fromTrackPoint;
+    bool middleButtonDownRecent;
+    bool nativeScrollRecent;
+    bool nativeMiddleActive;
+    bool nativeMiddleManaged;
+} TPOrigin;
+
+static uint64_t elapsed_ns(uint64_t now, uint64_t then) {
+    static mach_timebase_info_data_t timebase;
+    if (timebase.denom == 0) mach_timebase_info(&timebase);
+    if (then == 0 || now < then) return UINT64_MAX;
+    return (now - then) * timebase.numer / timebase.denom;
+}
+
+static TPOrigin poll_trackpoint_origin(void) {
+    TPOrigin origin = {false, false, false, false, false, false};
+    uint64_t now = mach_absolute_time();
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        if (ctx->queue) {
+            IOHIDValueRef value;
+            while ((value = IOHIDQueueCopyNextValueWithTimeout(ctx->queue, 0)) != NULL) {
+                uint64_t age = elapsed_ns(now, IOHIDValueGetTimeStamp(value));
+                if (age < 15000000ULL) {
+                    origin.fresh = true;
+                    ctx->lastPointerTime = now;
+                    IOHIDElementRef element = IOHIDValueGetElement(value);
+                    if (IOHIDElementGetUsagePage(element) == kHIDPage_Button &&
+                        IOHIDElementGetUsage(element) == 3) {
+                        ctx->lastMiddleButtonTime = now;
+                        ctx->rawMiddleDown = IOHIDValueGetIntegerValue(value) != 0;
+                    }
+                    if (!ctx->queueOK) {
+                        ctx->queueOK = true;
+                        LOG("HID queue confirmed — exact-device filtering active");
+                    }
+                }
+                CFRelease(value);
+            }
+        }
+        if (ctx->queueOK && elapsed_ns(now, ctx->lastPointerTime) < TP_RECENCY_NS)
+            origin.fromTrackPoint = true;
+        if (ctx->rawMiddleDown &&
+            elapsed_ns(now, ctx->lastMiddleButtonTime) < TP_RECENCY_NS)
+            origin.middleButtonDownRecent = true;
+        if (elapsed_ns(now, ctx->lastNativeScrollTime) < NATIVE_DUP_NS)
+            origin.nativeScrollRecent = true;
+        if (ctx->nativeMiddleDown) origin.nativeMiddleActive = true;
+        if (ctx->nativeMiddleDown ||
+            elapsed_ns(now, ctx->lastNativeMiddleTime) < TP_RECENCY_NS)
+            origin.nativeMiddleManaged = true;
+    }
+    return origin;
+}
+
+static CGPoint clamp_to_active_display(CGPoint point) {
+    CGDirectDisplayID displays[16];
+    uint32_t count = 0;
+    if (CGGetActiveDisplayList(16, displays, &count) != kCGErrorSuccess || count == 0)
+        return point;
+
+    CGPoint nearest = point;
+    double bestDistance = DBL_MAX;
+    for (uint32_t i = 0; i < count; i++) {
+        CGRect bounds = CGDisplayBounds(displays[i]);
+        if (CGRectContainsPoint(bounds, point)) return point;
+        CGPoint candidate = {
+            MAX(CGRectGetMinX(bounds), MIN(CGRectGetMaxX(bounds) - 1, point.x)),
+            MAX(CGRectGetMinY(bounds), MIN(CGRectGetMaxY(bounds) - 1, point.y)),
+        };
+        double dx = candidate.x - point.x, dy = candidate.y - point.y;
+        double distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            nearest = candidate;
+        }
+    }
+    return nearest;
 }
 
 /* ══════════════════════════════════════════════════════════════
    Unified CGEventTap at kCGHIDEventTap
-   Handles: Right Option→F18, middle-button scroll, sensitivity scaling
+   Handles: Preferred Scrolling fallback, software sensitivity fallback, PTS
    ══════════════════════════════════════════════════════════════ */
 static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                                     CGEventRef event, void *refcon) {
     (void)proxy; (void)refcon;
 
-    /* Re-enable if disabled by system */
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        LOG("tap re-enabled (disabled by %s)",
-            type == kCGEventTapDisabledByTimeout ? "timeout" : "user");
-        if (s_tap) CGEventTapEnable(s_tap, true);
+        reset_gesture_state();
+        if (s_tap && tp_count() > 0) CGEventTapEnable(s_tap, true);
+        LOG("event tap recovered after %s",
+            type == kCGEventTapDisabledByTimeout ? "timeout" : "user disable");
         return event;
     }
 
-    /* ── Right Option → F18 (ThinkPad keyboard only) ──────── */
-    if (type == kCGEventFlagsChanged && s_f18Enabled && s_tpCount > 0) {
-        int64_t kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
-        if (kc == 0x3D) {  /* Right Option */
-            CGEventFlags flags = CGEventGetFlags(event);
-            bool down = (flags & kCGEventFlagMaskAlternate) != 0;
-            CGEventSetFlags(event, flags & ~kCGEventFlagMaskAlternate);
-            CGEventRef f18 = CGEventCreateKeyboardEvent(NULL, 0x4F, down);
-            CGEventPost(kCGHIDEventTap, f18);
-            CFRelease(f18);
-            return NULL;
+    bool isMove = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
+                  type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
+    bool isDrag = type == kCGEventLeftMouseDragged ||
+                  type == kCGEventRightMouseDragged ||
+                  type == kCGEventOtherMouseDragged;
+    bool isOtherButton = type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp;
+    TPOrigin origin = (isMove || isOtherButton) ? poll_trackpoint_origin()
+                                                : (TPOrigin){0};
+
+    if (type == kCGEventScrollWheel) {
+        /* BLE emits a standard vertical wheel event in addition to its raw
+         * report. Pass it through unchanged; the exact-device raw callback
+         * records whether the TrackPoint gesture scrolled. */
+        cancel_pts();
+        s_pts_tracking = false;
+        s_pts_inhibit = false;
+        return event;
+    }
+
+    if (type == kCGEventLeftMouseDown || type == kCGEventRightMouseDown ||
+        type == kCGEventOtherMouseDown) {
+        cancel_pts();
+        s_pts_tracking = false;
+        s_pts_inhibit = false;
+    }
+
+    if (isDrag) {
+        cancel_pts();
+        s_pts_tracking = false;
+        s_pts_inhibit = false;
+    }
+
+    if (isOtherButton) {
+        int button = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+        if (button == 2 && s_preferredScroll && tp_count() > 0) {
+            /* Native report handling is exact-device and owns this gesture. */
+            if (origin.nativeMiddleManaged) {
+                reset_compatibility_middle();
+                return NULL;
+            }
+
+            if (type == kCGEventOtherMouseDown) {
+                if (!origin.middleButtonDownRecent) return event; /* fail closed */
+                s_middleDown = true;
+                s_hasMoved = false;
+                s_lastPos = CGEventGetLocation(event);
+                s_scrollAccumX = 0.0;
+                s_scrollAccumY = 0.0;
+                cancel_pts();
+                s_pts_tracking = false;
+                s_pts_inhibit = false;
+                return NULL;
+            }
+
+            if (s_middleDown) {
+                bool moved = s_hasMoved;
+                CGPoint point = CGEventGetLocation(event);
+                reset_gesture_state();
+                if (!moved) post_middle_click(point);
+                return NULL;
+            }
         }
     }
 
-    /* ── Middle button: down ───────────────────────────────── */
-    if (type == kCGEventOtherMouseDown) {
-        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
-        if (btn == 2 && s_tpCount > 0) {
-            LOG("middle DOWN");
-            s_middleDown = true;
-            s_hasMoved = false;
-            s_lastPos = CGEventGetLocation(event);
-            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-            /* cancel any pending PTS on middle-down */
-            if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
-            s_pts_tracking = false; s_pts_inhibit = false;
-            return NULL;
+    if (!isMove || tp_count() == 0) return event;
+
+    if (s_middleDown) {
+        /* Once an exact-device middle-down is consumed, own the gesture until
+         * release. Passing an unattributed move would create an orphan drag. */
+        if (!origin.fromTrackPoint) return NULL;
+        if (origin.nativeScrollRecent) return NULL;
+
+        /* Compatibility-mode fallback when native vendor reports are unavailable. */
+        CGPoint point = CGEventGetLocation(event);
+        s_scrollAccumX += point.x - s_lastPos.x;
+        s_scrollAccumY += point.y - s_lastPos.y;
+        s_lastPos = point;
+        double absX = fabs(s_scrollAccumX), absY = fabs(s_scrollAccumY);
+        if (absX > SCROLL_THRESHOLD || absY > SCROLL_THRESHOLD) {
+            s_hasMoved = true;
+            double x = copysign(pow(absX, 1.4) * s_scrollSpeed, s_scrollAccumX);
+            double y = copysign(pow(absY, 1.4) * s_scrollSpeed, s_scrollAccumY);
+            int sign = s_naturalScroll ? -1 : 1;
+            CGEventRef scroll = CGEventCreateScrollWheelEvent(NULL,
+                kCGScrollEventUnitPixel, 2, (int32_t)lrint(y * sign),
+                (int32_t)lrint(x * sign));
+            if (scroll) {
+                CGEventPost(kCGSessionEventTap, scroll);
+                CFRelease(scroll);
+            }
+            s_scrollAccumX = 0.0;
+            s_scrollAccumY = 0.0;
         }
+        return NULL;
     }
 
-    /* ── Middle button: up ─────────────────────────────────── */
-    if (type == kCGEventOtherMouseUp) {
-        int btn = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
-        if (btn == 2) {
-            LOG("middle UP (moved=%s)", s_hasMoved ? "yes" : "no");
-            s_middleDown = false;
-            s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
-            if (!s_hasMoved) {
-                /* Tap = click: re-inject middle click */
-                CGPoint p = CGEventGetLocation(event);
-                CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown, p, kCGMouseButtonCenter);
-                CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseUp,   p, kCGMouseButtonCenter);
-                CGEventPost(kCGHIDEventTap, dn);
-                CGEventPost(kCGHIDEventTap, up);
-                CFRelease(dn); CFRelease(up);
-            }
-            return NULL;
-        }
+    if (origin.nativeMiddleActive && origin.fromTrackPoint) return NULL;
+
+    if (!origin.fromTrackPoint) {
+        if (s_pts_tracking || s_pts_inhibit) reset_gesture_state();
+        return event;
     }
 
-    /* ── Mouse move / drag ─────────────────────────────────── */
-    if (type == kCGEventMouseMoved || type == kCGEventOtherMouseDragged) {
-        if (s_middleDown) {
-            /* Scroll mode */
-            CGPoint p = CGEventGetLocation(event);
-            double dx = p.x - s_lastPos.x, dy = p.y - s_lastPos.y;
-            LOG("scroll move dx=%.1f dy=%.1f accum=(%.1f,%.1f)", dx, dy, s_scrollAccumX+dx, s_scrollAccumY+dy);
-            s_lastPos = p;
-            s_scrollAccumX += dx;
-            s_scrollAccumY += dy;
-            double adx = fabs(s_scrollAccumX), ady = fabs(s_scrollAccumY);
-            if (adx > SCROLL_THRESHOLD || ady > SCROLL_THRESHOLD) {
-                s_hasMoved = true;
-                double vx = copysign(pow(adx, 1.4) * s_scrollSpeed, s_scrollAccumX);
-                double vy = copysign(pow(ady, 1.4) * s_scrollSpeed, s_scrollAccumY);
-                int sign = s_naturalScroll ? -1 : 1;
-                CGEventRef sc = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2,
-                    (int32_t)round(vy * sign),
-                    (int32_t)round(vx * sign));
-                LOG("scroll fired dy=%d dx=%d", (int32_t)round(vy*sign), (int32_t)round(vx*sign));
-                CGEventPost(kCGHIDEventTap, sc);
-                CFRelease(sc);
-                s_scrollAccumX = 0.0; s_scrollAccumY = 0.0;
+    double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
+    double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
+    if (dx == 0.0 && dy == 0.0) return event;
+
+    CGPoint newPosition = CGEventGetLocation(event);
+    if (!s_hardwareSensitivity) {
+        double factor = sensitivity_factor();
+        double scaledX = dx * factor, scaledY = dy * factor;
+        newPosition.x += scaledX - dx;
+        newPosition.y += scaledY - dy;
+        newPosition = clamp_to_active_display(newPosition);
+        CGEventSetLocation(event, newPosition);
+        CGEventSetDoubleValueField(event, kCGMouseEventDeltaX, scaledX);
+        CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, scaledY);
+    }
+
+    if (s_ptsEnabled && type == kCGEventMouseMoved) {
+        double distance = hypot(dx, dy);
+        bool needTimer = false;
+        cancel_pts();
+        if (s_pts_inhibit) {
+            needTimer = true;
+        } else if (!s_pts_tracking && origin.fresh) {
+            s_pts_tracking = true;
+            s_pts_startTime = CFAbsoluteTimeGetCurrent();
+            s_pts_totalDist = distance;
+            s_pts_pos = newPosition;
+            needTimer = true;
+        } else if (s_pts_tracking) {
+            s_pts_totalDist += distance;
+            s_pts_pos = newPosition;
+            if (CFAbsoluteTimeGetCurrent() - s_pts_startTime >= PTS_MAX_DURATION ||
+                s_pts_totalDist >= PTS_MAX_DIST) {
+                s_pts_tracking = false;
+                s_pts_inhibit = true;
             }
-            return NULL;  /* consume move event during scroll */
-        } else {
-            /* Sensitivity + acceleration scaling — ThinkPad origin only */
-            if (!s_tpCount) return event;
-
-            /* Poll IOHIDQueue: event is from ThinkPad if queue has FRESH values (< 15ms old).
-             * CGEventTap fires before IOHIDManager for the same event, so queue holds values
-             * from the PREVIOUS HID report (~8ms ago at 125Hz). Stale values (> 15ms) are
-             * from an idle TrackPoint and must be drained without counting as ThinkPad origin.
-             * Fallback: if queue never produces values, trust s_tpCount > 0. */
-            bool has_fresh = false;  /* true = definite ThinkPad HID value seen this callback */
-            if (s_tp_queue) {
-                static mach_timebase_info_data_t s_tb;
-                if (s_tb.denom == 0) mach_timebase_info(&s_tb);
-                uint64_t now = mach_absolute_time();
-
-                /* Drain queue; if any value is fresh (<15ms), update s_last_tp_time */
-                IOHIDValueRef val;
-                while ((val = IOHIDQueueCopyNextValueWithTimeout(s_tp_queue, 0)) != NULL) {
-                    uint64_t ts = IOHIDValueGetTimeStamp(val);
-                    uint64_t age_ns = (now - ts) * s_tb.numer / s_tb.denom;
-                    if (age_ns < 15000000ULL) {   /* 15ms — fresh HID report */
-                        has_fresh = true;
-                        s_last_tp_time = now;
-                        if (!s_tp_queue_ok) {
-                            s_tp_queue_ok = true;
-                            LOG("HID queue confirmed — per-device filtering active");
-                        }
-                    }
-                    CFRelease(val);
-                }
-
-                if (s_tp_queue_ok) {
-                    /* ThinkPad if fresh now OR seen within 50ms recency window */
-                    uint64_t since_ns = (now - s_last_tp_time) * s_tb.numer / s_tb.denom;
-                    bool from_tp = has_fresh || (since_ns < TP_RECENCY_NS);
-
-                    static CFAbsoluteTime s_last_filter_log = 0;
-                    CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
-                    if (now2 - s_last_filter_log > 1.0) {
-                        LOG("%s (since_tp=%.0fms%s)", from_tp ? "ThinkPad move" : "other device — filtered",
-                            since_ns / 1e6, has_fresh ? ",fresh" : "");
-                        s_last_filter_log = now2;
-                    }
-
-                    if (!from_tp) {
-                        /* Definite non-ThinkPad — cancel any pending PTS */
-                        if (s_pts_tracking || s_pts_inhibit) {
-                            if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
-                            s_pts_tracking = false; s_pts_inhibit = false;
-                        }
-                        return event;
-                    }
-                }
-            }
-
-            double dx = CGEventGetDoubleValueField(event, kCGMouseEventDeltaX);
-            double dy = CGEventGetDoubleValueField(event, kCGMouseEventDeltaY);
-            if (dx == 0.0 && dy == 0.0) return event;
-            /* Windows-like sigmoid acceleration: 1.0x at rest, ~2.5x at high speed */
-            double speed = sqrt(dx * dx + dy * dy);
-            double accel = 1.0 + 1.5 * (1.0 - exp(-speed / 3.0));
-            double factor = sensitivity_factor() * accel;
-            double newDx = dx * factor;
-            double newDy = dy * factor;
-            CGPoint pos = CGEventGetLocation(event);
-            CGPoint newPos = { pos.x + (newDx - dx), pos.y + (newDy - dy) };
-            CGRect bounds = s_displayBounds;
-            newPos.x = MAX(bounds.origin.x, MIN(bounds.origin.x + bounds.size.width  - 1, newPos.x));
-            newPos.y = MAX(bounds.origin.y, MIN(bounds.origin.y + bounds.size.height - 1, newPos.y));
-            CGEventSetLocation(event, newPos);
-            CGEventSetDoubleValueField(event, kCGMouseEventDeltaX, newDx);
-            CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, newDy);
-
-            /* Press-to-select: track brief stick bursts */
-            if (s_ptsEnabled) {
-                double rawSpeed = sqrt(dx * dx + dy * dy);
-                /* always cancel pending stop timer on new movement */
-                if (s_pts_timer) { CFRunLoopTimerInvalidate(s_pts_timer); s_pts_timer = NULL; }
-
-                bool need_timer = false;
-                if (s_pts_inhibit) {
-                    /* gesture already failed — reschedule "stick stopped" clear */
-                    need_timer = true;
-                } else if (!s_pts_tracking) {
-                    /* Only start new PTS session on confirmed ThinkPad (fresh HID value).
-                     * Recency-only passes (ambiguous device) must not start new sessions. */
-                    if (has_fresh) {
-                        s_pts_tracking = true;
-                        s_pts_startTime = CFAbsoluteTimeGetCurrent();
-                        s_pts_totalDist = rawSpeed;
-                        s_pts_pos = newPos;
-                        need_timer = true;
-                    }
-                } else {
-                    s_pts_totalDist += rawSpeed;
-                    s_pts_pos = newPos;
-                    bool valid = (CFAbsoluteTimeGetCurrent() - s_pts_startTime) < PTS_MAX_DURATION
-                              && s_pts_totalDist < PTS_MAX_DIST;
-                    if (!valid) {
-                        /* too long/far — inhibit until stick stops */
-                        s_pts_tracking = false;
-                        s_pts_inhibit  = true;
-                    }
-                    need_timer = true;
-                }
-
-                if (need_timer) {
-                    CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
-                    s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
-                        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY,
-                        0, 0, 0, pts_fire, &ctx);
-                    CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopDefaultMode);
-                }
-            }
-
-            return event;
+            needTimer = true;
         }
+        if (needTimer) schedule_pts_timer();
     }
 
     return event;
@@ -774,8 +1589,9 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 
 static void set_tap_enabled(bool enabled) {
     if (s_tap) CGEventTapEnable(s_tap, enabled);
+    if (!enabled) reset_gesture_state();
     LOG("ThinkPad %s — tap %s", enabled ? "connected" : "disconnected", enabled ? "ON" : "OFF");
-    apply_key_remap();
+    if (enabled) apply_key_remap();
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
@@ -783,10 +1599,14 @@ static void try_create_event_tap(void) {
     if (s_tap) return;
 
     CGEventMask mask =
-        CGEventMaskBit(kCGEventFlagsChanged)      |
+        CGEventMaskBit(kCGEventLeftMouseDown)     |
+        CGEventMaskBit(kCGEventRightMouseDown)    |
         CGEventMaskBit(kCGEventOtherMouseDown)    |
         CGEventMaskBit(kCGEventOtherMouseUp)      |
+        CGEventMaskBit(kCGEventScrollWheel)       |
         CGEventMaskBit(kCGEventMouseMoved)        |
+        CGEventMaskBit(kCGEventLeftMouseDragged)  |
+        CGEventMaskBit(kCGEventRightMouseDragged) |
         CGEventMaskBit(kCGEventOtherMouseDragged);
 
     s_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
@@ -796,10 +1616,16 @@ static void try_create_event_tap(void) {
         LOG("unified tap failed — accessibility permission required");
         return;
     }
-    CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, s_tap, 0);
-    CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes);
-    CGEventTapEnable(s_tap, s_tpCount > 0);
-    LOG("unified tap created (kCGHIDEventTap) — %s", s_tpCount > 0 ? "ON" : "waiting for ThinkPad");
+    s_tapSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, s_tap, 0);
+    if (!s_tapSource) {
+        CFRelease(s_tap); s_tap = NULL;
+        LOG("event tap run-loop source creation failed");
+        return;
+    }
+    CFRunLoopAddSource(CFRunLoopGetMain(), s_tapSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(s_tap, tp_count() > 0);
+    LOG("unified tap created (kCGHIDEventTap) — %s",
+        tp_count() > 0 ? "ON" : "waiting for ThinkPad");
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
@@ -810,193 +1636,171 @@ static void try_create_event_tap(void) {
 /* Attempt to open stored ThinkPad devices and build queue.
  * Called at startup and whenever Input Monitoring permission is detected. */
 static void try_build_queue_for_devices(void) {
-    if (s_tp_queue) return;
-    if (!s_tp_devices || CFArrayGetCount(s_tp_devices) == 0) return;
-
-    CFIndex count = CFArrayGetCount(s_tp_devices);
-    for (CFIndex i = 0; i < count; i++) {
-        IOHIDDeviceRef dev = (IOHIDDeviceRef)CFArrayGetValueAtIndex(s_tp_devices, i);
-        IOReturn openRet = IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
-        LOG("IM-retry: IOHIDDeviceOpen 0x%08X (%s)", openRet,
-            openRet == kIOReturnSuccess     ? "ok" :
-            openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
-        if (openRet != kIOReturnSuccess && openRet != kIOReturnExclusiveAccess) continue;
-
-        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
-        int total = elems ? (int)CFArrayGetCount(elems) : 0;
-        LOG("IM-retry: %d elements found", total);
-        int added = 0;
-        if (total > 0) {
-            IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, dev, 64, kIOHIDOptionsTypeNone);
-            if (queue) {
-                for (CFIndex j = 0; j < total; j++) {
-                    IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, j);
-                    uint32_t ePage  = IOHIDElementGetUsagePage(elem);
-                    uint32_t eUsage = IOHIDElementGetUsage(elem);
-                    if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) {
-                        IOHIDQueueAddElement(queue, elem);
-                        added++;
-                    }
-                }
-                if (added > 0) {
-                    IOHIDQueueStart(queue);
-                    s_tp_queue = queue;
-                    LOG("IM-retry: queue built with %d X/Y elements — per-device filter active", added);
-                } else {
-                    CFRelease(queue);
-                    LOG("IM-retry: no X/Y elements on this device");
-                }
-            }
-        }
-        if (elems) CFRelease(elems);
-        if (s_tp_queue) break;
-    }
+    for (TPHIDDevice *ctx in [s_tpDevices copy]) [ctx buildQueue];
+    apply_hardware_settings();
 }
 
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
+    if (!is_trackpoint_keyboard_ii(dev)) return;
+    for (TPHIDDevice *existing in s_tpDevices)
+        if (existing->device == dev) return;
 
-    /* Store device for later retry (e.g. when Input Monitoring granted) */
-    if (s_tp_devices) CFArrayAppendValue(s_tp_devices, dev);  /* array retains */
-
-    IOReturn openRet = IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone);
-    LOG("IOHIDDeviceOpen: 0x%08X (%s)", openRet,
-        openRet == kIOReturnSuccess ? "ok" :
-        openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
-    s_tpCount++;
-
-    /* Build X/Y element queue for this device.
-     * BLE devices may not have elements ready immediately — retry after 500ms if needed. */
-    if (!s_tp_queue) {
-        IOHIDDeviceRef devRetained = (IOHIDDeviceRef)CFRetain(dev);
-        void (^tryBuildQueue)(void) = ^{
-            if (s_tp_queue) { CFRelease(devRetained); return; }
-            CFArrayRef elems = IOHIDDeviceCopyMatchingElements(devRetained, NULL, kIOHIDOptionsTypeNone);
-            int total = elems ? (int)CFArrayGetCount(elems) : 0;
-            LOG("HID device: %d elements (queue build attempt)", total);
-            int added = 0;
-            if (total > 0) {
-                IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, devRetained, 64, kIOHIDOptionsTypeNone);
-                if (queue) {
-                    for (CFIndex i = 0; i < total; i++) {
-                        IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
-                        uint32_t ePage  = IOHIDElementGetUsagePage(elem);
-                        uint32_t eUsage = IOHIDElementGetUsage(elem);
-                        if (ePage == 1 && (eUsage == 0x30 || eUsage == 0x31)) {
-                            IOHIDQueueAddElement(queue, elem);
-                            added++;
-                        }
-                    }
-                    if (added > 0) {
-                        IOHIDQueueStart(queue);
-                        s_tp_queue = queue;
-                        LOG("HID queue created with %d X/Y elements", added);
-                    } else {
-                        CFRelease(queue);
-                        LOG("HID queue: no X/Y elements on this device");
-                    }
-                }
-            }
-            if (elems) CFRelease(elems);
-            CFRelease(devRetained);
-        };
-
-        CFArrayRef elems = IOHIDDeviceCopyMatchingElements(dev, NULL, kIOHIDOptionsTypeNone);
-        int total = elems ? (int)CFArrayGetCount(elems) : 0;
-        if (elems) CFRelease(elems);
-
-        if (total > 0) {
-            /* Elements ready now — build immediately */
-            tryBuildQueue();
-        } else {
-            /* BLE not yet enumerated — retry in 500ms */
-            LOG("HID device: 0 elements at connect — will retry in 2s");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
-                           dispatch_get_main_queue(), tryBuildQueue);
-        }
+    TPHIDDevice *deviceContext = [[TPHIDDevice alloc] initWithDevice:dev];
+    [s_tpDevices addObject:deviceContext];
+    [deviceContext buildQueue];
+    apply_hardware_settings();
+    if (!deviceContext->queue) {
+        __weak TPHIDDevice *weakContext = deviceContext;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            TPHIDDevice *strongContext = weakContext;
+            if (!strongContext || ![s_tpDevices containsObject:strongContext]) return;
+            [strongContext buildQueue];
+            apply_hardware_settings();
+        });
     }
-
+    LOG("TrackPoint Keyboard II connected pid=%04X",
+        (unsigned int)device_number(dev, CFSTR(kIOHIDProductIDKey)));
     set_tap_enabled(true);
 }
 
 static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
-
-    /* Remove from stored devices array */
-    if (s_tp_devices) {
-        CFIndex idx = CFArrayGetFirstIndexOfValue(s_tp_devices,
-            CFRangeMake(0, CFArrayGetCount(s_tp_devices)), dev);
-        if (idx != kCFNotFound) CFArrayRemoveValueAtIndex(s_tp_devices, idx);  /* array releases */
-    }
-
-    if (--s_tpCount <= 0) {
-        s_tpCount = 0; s_middleDown = false;
-        if (s_tp_queue) {
-            IOHIDQueueStop(s_tp_queue);
-            CFRelease(s_tp_queue);
-            s_tp_queue = NULL;
-            s_tp_queue_ok = false;
-        }
-        set_tap_enabled(false);
-        /* restore default mouse acceleration */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        io_service_t svc = IOServiceGetMatchingService(
-            kIOMasterPortDefault, IOServiceMatching(kIOHIDSystemClass));
-        if (svc) {
-            io_connect_t conn;
-            if (IOServiceOpen(svc, mach_task_self(), kIOHIDParamConnectType, &conn) == KERN_SUCCESS) {
-                IOHIDSetMouseAcceleration(conn, 0.6875);  /* macOS default */
-                IOServiceClose(conn);
-            }
-            IOObjectRelease(svc);
-        }
-#pragma clang diagnostic pop
-        LOG("acceleration restored to default");
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
+    NSUInteger index = [s_tpDevices indexOfObjectPassingTest:
+        ^BOOL(TPHIDDevice *candidate, NSUInteger idx, BOOL *stop) {
+            (void)idx; (void)stop;
+            return candidate->device == dev;
+        }];
+    if (index == NSNotFound) return;
+    [s_tpDevices[index] detachForRemoval];
+    [s_tpDevices removeObjectAtIndex:index];
+    reset_gesture_state();
+    s_hardwareSensitivity = false;
+    if (tp_count() > 0) apply_hardware_settings();
+    set_tap_enabled(tp_count() > 0);
+    LOG("TrackPoint Keyboard II disconnected");
 }
 
 static void setup_hid(void) {
-    s_tp_devices = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
-    IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-    int vid = LENOVO_VID;
-    CFNumberRef vidNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &vid);
-    CFMutableDictionaryRef match = CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), vidNum);
-    CFRelease(vidNum);
-    IOHIDManagerSetDeviceMatching(mgr, match); CFRelease(match);
-    IOHIDManagerRegisterDeviceMatchingCallback(mgr, hid_added, NULL);
-    IOHIDManagerRegisterDeviceRemovalCallback(mgr, hid_removed, NULL);
-    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-    IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
-    LOG("HID manager active");
+    s_tpDevices = [NSMutableArray array];
+    s_hidManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    NSArray *matches = @[
+        @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_USB_PID)},
+        @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_BLE_PID)},
+    ];
+    IOHIDManagerSetDeviceMatchingMultiple(s_hidManager, (__bridge CFArrayRef)matches);
+    IOHIDManagerRegisterDeviceMatchingCallback(s_hidManager, hid_added, NULL);
+    IOHIDManagerRegisterDeviceRemovalCallback(s_hidManager, hid_removed, NULL);
+    IOHIDManagerScheduleWithRunLoop(s_hidManager, CFRunLoopGetMain(),
+                                     kCFRunLoopCommonModes);
+    IOReturn result = IOHIDManagerOpen(s_hidManager, kIOHIDOptionsTypeNone);
+    LOG("HID manager: 0x%08X", (unsigned int)result);
 }
 
 /* ══════════════════════════════════════════════════════════════
    main
    ══════════════════════════════════════════════════════════════ */
+static int run_self_test(void) {
+    TPReportSpec spec;
+    uint8_t report[8];
+    CFIndex length = 0;
+
+    assert(build_config_report(TP_USB_PID, 0x02, 5, &spec, report, &length));
+    assert(spec.type == kIOHIDReportTypeFeature && spec.reportID == 0x13);
+    assert(length == 8 && report[0] == 0x13 && report[1] == 0x02 && report[2] == 5);
+    for (CFIndex i = 3; i < length; i++) assert(report[i] == 0);
+
+    assert(build_config_report(TP_BLE_PID, 0x09, 1, &spec, report, &length));
+    assert(spec.type == kIOHIDReportTypeOutput && spec.reportID == 0x18);
+    assert(length == 3 && report[0] == 0x18 && report[1] == 0x09 && report[2] == 1);
+    assert(!build_config_report(0x1234, 0x02, 5, &spec, report, &length));
+
+    int8_t horizontal = 0, vertical = 0;
+    uint8_t wheelWithID[] = {0x16, 0xFE, 0x03};
+    assert(decode_wheel_report(0x16, wheelWithID, 3, &horizontal, &vertical));
+    assert(horizontal == -2 && vertical == 3);
+    uint8_t usbWheel[] = {0x16, 0x7F, 0x80};
+    assert(decode_wheel_report(0x16, usbWheel, 3, &horizontal, &vertical));
+    assert(horizontal == 127 && vertical == -128);
+    uint8_t wheelWithoutID[] = {0x16, 0xFF};
+    assert(!decode_wheel_report(0x16, wheelWithoutID, 2, &horizontal, &vertical));
+    uint8_t wheelWrongID[] = {0x22, 0x01, 0x02};
+    assert(!decode_wheel_report(0x22, wheelWrongID, 3, &horizontal, &vertical));
+    uint8_t wheelShort[] = {0x16, 0x01};
+    assert(!decode_wheel_report(0x16, wheelShort, 2, &horizontal, &vertical));
+
+    uint16_t hotkey = 0;
+    uint8_t usbHotkey[] = {0x05, 0xB8};
+    assert(decode_hotkey_report(TP_USB_PID, 0x05, usbHotkey, 2, &hotkey));
+    assert(hotkey == 0xB8);
+    uint8_t bleHotkey[] = {0x05, 0xB8, 0x00};
+    assert(decode_hotkey_report(TP_BLE_PID, 0x05, bleHotkey, 3, &hotkey));
+    assert(hotkey == 0xB8);
+    assert(!decode_hotkey_report(TP_USB_PID, 0x05, bleHotkey, 3, &hotkey));
+    assert(!decode_hotkey_report(TP_BLE_PID, 0x05, usbHotkey, 2, &hotkey));
+    assert(!decode_hotkey_report(0x1234, 0x05, usbHotkey, 2, &hotkey));
+
+    bool middleDown = false;
+    uint8_t middleWithID[] = {0x15, 0x00, 0x04, 0, 0, 0, 0, 0, 0};
+    assert(decode_middle_report(0x15, middleWithID, 9, &middleDown) && middleDown);
+    uint8_t middleUp[] = {0x15, 0, 0, 0, 0, 0, 0, 0, 0};
+    assert(decode_middle_report(0x15, middleUp, 9, &middleDown) && !middleDown);
+    uint8_t notMiddle[] = {0x15, 0x05, 0, 0, 0, 0, 0, 0, 0};
+    assert(decode_middle_report(0x15, notMiddle, 9, &middleDown) && !middleDown);
+    uint8_t middleWithoutID[] = {0, 0x04, 0, 0, 0, 0, 0, 0};
+    assert(!decode_middle_report(0x15, middleWithoutID, 8, &middleDown));
+
+    puts("trackpointd self-test: ok");
+    return 0;
+}
+
 int main(int argc, const char *argv[]) {
+    if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return run_self_test();
     freopen("/tmp/trackpointd.log", "a", stderr);
     setvbuf(stderr, NULL, _IONBF, 0);
 
     @autoreleasepool {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if ([ud objectForKey:PREF_SENSITIVITY])
-            s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
-        if ([ud objectForKey:PREF_F18])
-            s_f18Enabled  = [ud boolForKey:PREF_F18];
-        if ([ud objectForKey:PREF_SWAP])
-            s_swapEnabled = [ud boolForKey:PREF_SWAP];
-        if ([ud objectForKey:PREF_SCROLL_SPEED])
-            s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
-        if ([ud objectForKey:PREF_PTS])
-            s_ptsEnabled  = [ud boolForKey:PREF_PTS];
+        [ud registerDefaults:@{
+            PREF_SENSITIVITY: @(TP_SENSITIVITY_DEFAULT),
+            PREF_F18: @YES,
+            PREF_SWAP: @YES,
+            PREF_SCROLL_SPEED: @(SCROLL_SPEED),
+            PREF_PTS: @NO,
+            PREF_SCROLL: @YES,
+            PREF_FN_LOCK: @NO,
+            PREF_F12_MODE: @(TPF12OpenURL),
+            PREF_F12_URL: @"https://support.lenovo.com/accessories/trackpoint_keyboard",
+            PREF_F12_TEXT: @"",
+            PREF_F12_FILES: @[],
+        }];
+        s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
+        s_f18Enabled = [ud boolForKey:PREF_F18];
+        s_swapEnabled = [ud boolForKey:PREF_SWAP];
+        s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
+        s_ptsEnabled = [ud boolForKey:PREF_PTS];
+        s_preferredScroll = [ud boolForKey:PREF_SCROLL];
+        s_fnLock = [ud boolForKey:PREF_FN_LOCK];
+        s_f12Mode = (TPF12Mode)MAX(TPF12Disabled,
+            MIN(TPF12TypeText, [ud integerForKey:PREF_F12_MODE]));
+        if ([[ud objectForKey:PREF_F12_URL] isKindOfClass:NSString.class])
+            s_f12URL = [ud stringForKey:PREF_F12_URL];
+        if ([[ud objectForKey:PREF_F12_TEXT] isKindOfClass:NSString.class])
+            s_f12Text = [ud stringForKey:PREF_F12_TEXT];
+        NSArray *storedFiles = [ud arrayForKey:PREF_F12_FILES];
+        if (storedFiles) {
+            NSMutableArray<NSString *> *validFiles = [NSMutableArray array];
+            for (id path in storedFiles)
+                if ([path isKindOfClass:NSString.class] && validFiles.count < 4)
+                    [validFiles addObject:path];
+            s_f12Files = [validFiles copy];
+        }
 
-        LOG("prefs: sensitivity=%d (%.2fx) scrollSpeed=%.1f f18=%s swap=%s",
-            s_sensitivity, sensitivity_factor(), s_scrollSpeed,
-            s_f18Enabled ? "on" : "off", s_swapEnabled ? "on" : "off");
+        LOG("prefs: sensitivity=%d scroll=%.1f preferred=%s fnLock=%s f18=%s swap=%s",
+            s_sensitivity, s_scrollSpeed, s_preferredScroll ? "on" : "off",
+            s_fnLock ? "on" : "off", s_f18Enabled ? "on" : "off",
+            s_swapEnabled ? "on" : "off");
 
         NSApplication *app = [NSApplication sharedApplication];
         app.activationPolicy = NSApplicationActivationPolicyAccessory;

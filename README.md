@@ -1,60 +1,118 @@
-# trackpoint-daemon-macos
+# TrackPointD for macOS
 
-A lightweight macOS menu bar app that makes the ThinkPad TrackPoint Keyboard II work like it does on Windows.
+A native menu bar companion for the Lenovo ThinkPad TrackPoint Keyboard II. It
+implements the useful parts of Lenovo's Windows control-panel software without
+drivers or third-party dependencies.
 
-## Features
+## Version 2 highlights
 
-- **Middle button scroll** — Hold middle button and move the TrackPoint to scroll (non-linear curve, sub-threshold accumulation)
-- **Scroll direction** — Auto-detects macOS natural scroll setting and matches it
-- **Right Option → F18** — Remap Right Option to F18 for input source switching
-- **Left Opt ↔ Left Cmd swap** — Fix reversed modifier key layout on the Windows-designed keyboard
-- **Pointer sensitivity** — Adjustable 1–9 via settings (BLE-compatible software scaling)
-- **Scroll speed** — Adjustable 1.0–8.0 via settings
-- **Mouse acceleration disabled** — Linear pointer movement while TrackPoint is connected; restored on disconnect
-- **Auto-activate on connect** — All remaps apply when ThinkPad connects, revert on disconnect
+- Sends the keyboard's real hardware speed setting instead of pretending with
+  a made-up acceleration curve.
+- Supports both official transports: USB receiver `17EF:60EE` and Bluetooth LE
+  `17EF:60E1`.
+- Adds the Windows `ThinkPad Preferred Scrolling` switch and parses the native
+  horizontal/vertical wheel reports.
+- Adds the Windows F12 star-key actions: open up to four files/apps, open a web
+  site, or type saved text.
+- Adds Fn Lock control and reapplies keyboard settings after reconnect or wake.
+- Moves both modifier remaps to exact-device `hidutil` rules. Other keyboards
+  and the user's global remaps are no longer touched.
+- Removes all global mouse acceleration/defaults changes.
+- Fixes the recursive middle-click event loop, event-tap state recovery, HID
+  queue lifetime, and Press-to-Select timer leaks.
+- Replaces the in-place installer with build, self-test, sign, verify, then a
+  staged replacement with rollback.
 
-## Why F18?
+## Settings UI
 
-macOS uses a keyboard shortcut to switch input sources (e.g. English ↔ Korean). The Right Option key on the ThinkPad keyboard is inconvenient for this. By remapping it to F18, you can assign a clean, conflict-free shortcut:
+Click `TP+`, `TP-`, or `TP!` in the menu bar, then **Settings…**.
 
-**System Settings → Keyboard → Keyboard Shortcuts → Input Sources → Select the previous input source → press F18**
+| Setting | What it does | Origin |
+|---|---|---|
+| Pointer Sensitivity | Hardware level 1–9, default 5 | Lenovo Windows parity |
+| ThinkPad Preferred Scrolling | Middle button + stick, vertical and horizontal | Lenovo Windows parity |
+| User Defined Key (F12 ★) | Files/apps, HTTP(S) URL, text, or disabled | Lenovo Windows parity |
+| Fn Lock | Standard F1–F12 vs. icon actions | Keyboard firmware |
+| Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
+| Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
+| Scroll Speed | USB, horizontal, and fallback multiplier; BLE vertical follows macOS | macOS adaptation |
+| Legacy Press-to-Select | Brief stick tap produces a left click; default off | Older UltraNav-inspired extra |
 
-F18 is a safe choice because no app uses it by default.
+Saved text is stored in macOS user defaults as plain text. Do not put passwords
+or sensitive personal information in the F12 text action.
 
-## Why Left Opt ↔ Left Cmd swap?
+## What Lenovo's Windows program actually provides
 
-The ThinkPad TrackPoint Keyboard II is designed for Windows, where the key order (left to right) is:
+Lenovo's public package is version `1.0.8.06241` (2021-08-17). Its Control
+Panel page, **External TrackPoint Keyboard**, exposes exactly three user-facing
+settings:
 
-```
-Ctrl  |  Win  |  Alt  |  Space  ...
-```
+1. Pointer speed: nine positions, internal value 0–8, default 4. The device
+   receives 1–9, default 5.
+2. ThinkPad Preferred Scrolling: on by default.
+3. F12 user-defined action: open files/apps, open a web site, or enter text.
 
-On macOS the expected order is:
+The package has no published source. Inspection of Lenovo's official installer
+(`SHA-256 d14fc7c06306db52fb9c0b01b50efdba0b89dfdae6f75d9ff22bf5198189b3c5`)
+shows a user-space stack rather than a custom kernel driver:
 
-```
-Ctrl  |  Option  |  Command  |  Space  ...
-```
+| Windows component | Role established from the package |
+|---|---|
+| `ADDPage.dll` | External TrackPoint Keyboard Control Panel UI |
+| `SetSpeed.exe` + `fsHid*.dll` | HID configuration reports |
+| `HScrollFun.exe` | Raw Input vertical/horizontal scrolling |
+| `HKF12.exe` | F12 files/apps, URL, and text actions |
+| `osd.exe` + `ExternalTPKBSvc.exe` | Hotkeys, OSD, and settings reapply |
 
-The physical keys are swapped compared to macOS convention. This setting corrects the layout so muscle memory from a MacBook keyboard works correctly.
+| Windows behavior | macOS status |
+|---|---|
+| Hardware pointer speed 1–9 | Implemented over USB and BLE |
+| Preferred vertical/horizontal scrolling | Implemented with native reports plus compatibility fallback |
+| Middle click when no scroll occurred | Implemented with deferred click, matching the Linux state machine |
+| F12 files/apps, URL, text | Implemented; up to four files/apps |
+| Fn+Esc / Fn Lock | Implemented and persisted |
+| F9 Settings, F10 Bluetooth, F11 keyboard settings | Adapted to the equivalent macOS panes/UI |
+| Fn+PrtSc snipping tool | Adapted to macOS interactive screenshot |
+| Volume and brightness keys/OSD | Handled by macOS when the host exposes the standard usages |
+| Action Center, global mic mute, Win+P, SysRq/Break/Scroll Lock | Not emulated; no stable exact macOS equivalent |
+| Fn+4 sleep | Not intercepted; use the normal macOS sleep controls |
+| Swift Pair | Windows-only; use normal macOS Bluetooth pairing |
+| Pairing mode, LEDs, six-key assistive input | Keyboard firmware; no daemon implementation needed |
+
+Natural scrolling, modifier swaps, F18, adjustable scroll speed, and legacy
+Press-to-Select are useful macOS additions, not Lenovo Windows features.
 
 ## Requirements
 
-- macOS 12+
-- ThinkPad TrackPoint Keyboard II (VID `0x17EF`)
+- macOS 12 or newer
+- ThinkPad TrackPoint Keyboard II:
+  - USB receiver: VID `0x17EF`, PID `0x60EE`
+  - Bluetooth LE: VID `0x17EF`, PID `0x60E1`
 - Xcode Command Line Tools (`xcode-select --install`)
+- Accessibility and Input Monitoring permission for TrackPointD
 
-## Install
+Other Lenovo devices no longer activate the daemon.
+
+## Install or upgrade
 
 ```bash
 git clone https://github.com/hoyaaaa/trackpoint-daemon-macos.git
 cd trackpoint-daemon-macos
+bash install.sh --check   # build and verify without installing
 bash install.sh
 ```
 
-Grant **Accessibility** permission when prompted:
-**System Settings → Privacy & Security → Accessibility → TrackPointD ✓**
+The installer builds a separate app, runs its protocol self-test, signs and
+verifies it, and only then replaces the installed copy. A failed upgrade rolls
+back to the previous app.
 
-> If you recompile from source, the code signature changes and macOS invalidates the permission — you must re-grant it.
+Grant both permissions:
+
+1. **System Settings → Privacy & Security → Accessibility → TrackPointD**
+2. **System Settings → Privacy & Security → Input Monitoring → TrackPointD**
+
+If an existing permission stops working after a new build, toggle TrackPointD
+off and on in that pane. The installer does not erase TCC permissions.
 
 ## Uninstall
 
@@ -62,42 +120,64 @@ Grant **Accessibility** permission when prompted:
 bash uninstall.sh
 ```
 
-## Settings
-
-Click the menu bar icon (`TP+` when connected, `TP-` when not, `TP!` if accessibility not granted) → **Settings...**
-
-| Setting | Description |
-|---|---|
-| Right Option → F18 | Remap Right Option key to F18 |
-| Left Opt ↔ Left Cmd Swap | Fix modifier key order for macOS layout |
-| Pointer Sensitivity | 1 (slow) – 9 (fast), default 5. Applied in software, works over BLE. |
-| Scroll Speed | 1.0 (slow) – 8.0 (fast), default 3.5. |
-| Press-to-Select | Tap the TrackPoint stick briefly → left click. Off by default. |
+Uninstall removes the app, Login Item, legacy LaunchAgent, and the per-device
+key-mapping property for the two TrackPoint Keyboard II IDs. If you manually
+added other `hidutil` mappings to those exact IDs, reapply them afterward. No
+other keyboard, global mouse setting, or privacy permission is changed.
 
 ## How it works
 
 | Feature | Mechanism |
 |---|---|
-| Middle button scroll | Unified `CGEventTap` at `kCGHIDEventTap` (earliest level) |
-| Scroll direction | Reads `com.apple.swipescrolldirection` from NSUserDefaults |
-| Right Option → F18 | `CGEventTap` (HID level, no delay) |
-| Left Opt ↔ Left Cmd swap | `hidutil` kernel-level key remap |
-| Pointer sensitivity | `CGEventSetLocation` delta scaling (HID level) |
-| Acceleration removal | `IOHIDSetMouseAcceleration(-1.0)` on connect, restored on disconnect |
-| Device detection | `IOHIDManager` matching Lenovo VID `0x17EF` |
+| Device detection | `IOHIDManager`, exact VID/PID matching |
+| Hardware settings | `IOHIDDeviceSetReport` on attach, change, reconnect, and wake |
+| Preferred scrolling | Report `0x16` on both transports; BLE standard vertical + vendor horizontal; fallback if needed |
+| Middle click | Hold pending; emit click only if no wheel report/movement occurred |
+| F12 and Lenovo hotkeys | Exact-device input-report callback |
+| Key remaps | `hidutil --matching` for this model only |
+| Software sensitivity fallback / PTS | One `kCGHIDEventTap`, fail-closed origin filter |
 
-## Windows parity
+Configuration reports, independently reconstructed from public protocol facts:
 
-| Behavior | Status |
-|---|---|
-| Middle button scroll | ✓ |
-| Scroll direction (matches system setting) | ✓ |
-| Key remapping (Opt↔Cmd, Right Opt→F18) | ✓ |
-| Pointer sensitivity (1–9 scale) | ✓ (software scaling, not hardware) |
-| Scroll speed adjustment | ✓ |
-| Non-linear scroll curve | ✓ (approximate) |
-| Acceleration curve | ✓ (sigmoid 1.0x–2.5x, approximate) |
-| Press-to-select | ✓ (tap stick → left click; enable in Settings) |
+| Transport | Report | Bytes |
+|---|---|---|
+| USB `60EE` | Feature report `0x13`, 8 bytes | `13 command value 00 00 00 00 00` |
+| BLE `60E1` | Output report `0x18`, 3 bytes | `18 command value` |
+
+Commands: `0x02` hardware speed, `0x05` Fn Lock, `0x09` Preferred Scrolling.
+The undocumented Windows initialization command is deliberately not sent.
+
+The native wheel input report ID is `0x16` (22 decimal) on both USB and BLE.
+BLE additionally sends standard vertical-wheel input, so only its vendor
+horizontal value is synthesized to avoid double vertical scrolling.
+Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
+middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
+before a report is used.
+
+## Build check
+
+```bash
+clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
+  -o /tmp/trackpointd trackpointd.m \
+  -framework Cocoa -framework ApplicationServices -framework IOKit -lm
+/tmp/trackpointd --self-test
+```
+
+## Research sources and licensing
+
+- [Lenovo Windows download page](https://support.lenovo.com/us/en/downloads/ds543713-thinkpad-trackpoint-keyboard-ii-software-for-windows-7-windows-10)
+- [Official English user guide](https://download.lenovo.com/consumer/options/trackpoint_keyboard_II_user_guide_en.pdf)
+- [Official Korean user guide](https://download.lenovo.com/consumer/options/trackpoint_keyboard_II_user_guide_ko.pdf)
+- [Linux `hid-lenovo.c`](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-lenovo.c)
+- [Linux Keyboard II support commit](https://github.com/torvalds/linux/commit/24401f291dcc4f2c18b9e2f65763cbaadc7a1528)
+- [USB capture and descriptor from the Linux support report](https://gitlab.freedesktop.org/libinput/libinput/-/issues/547#note_1104344)
+- [Linux resume/reapply fix](https://github.com/torvalds/linux/commit/2f2bd7cbd1d1)
+- [tp2ctl protocol captures](https://github.com/telecastr/tp2ctl)
+
+The Lenovo binaries are proprietary and are not copied or redistributed. Linux
+is GPL-2.0-or-later; this MIT project uses protocol facts and an independent
+implementation, not copied Linux source. Repositories without a clear license
+were treated as behavioral references only.
 
 ## License
 

@@ -1,120 +1,142 @@
 #!/usr/bin/env bash
-# trackpoint/install.sh
-set -e
+set -euo pipefail
+
+CHECK_ONLY=false
+case "${1:-}" in
+    "") ;;
+    --check) CHECK_ONLY=true ;;
+    *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DAEMON_SRC="$SCRIPT_DIR/trackpointd.m"
-APP="$HOME/Applications/TrackPointD.app"
-DAEMON_BIN="$APP/Contents/MacOS/trackpointd"
+APP="${HOME:?}/Applications/TrackPointD.app"
 OLD_PLIST="$HOME/Library/LaunchAgents/com.user.trackpointd.plist"
-
-GREEN='\033[0;32m'; NC='\033[0m'
-log() { echo -e "${GREEN}[+]${NC} $1"; }
-
-echo "=============================="
-echo " TrackPoint daemon install"
-echo "=============================="
-
-# ── 0. Stop running instance ────────────────────────────────────
-if pgrep -f "trackpointd" > /dev/null 2>&1; then
-    log "Stopping running TrackPointD..."
-    pkill -f "trackpointd" 2>/dev/null || true
-    sleep 0.5
+if ! $CHECK_ONLY && [ -e "$APP" ] && [ ! -d "$APP" ]; then
+    printf 'Refusing to replace non-app path: %s\n' "$APP" >&2
+    exit 1
 fi
+BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/trackpointd-install.XXXXXX")"
+STAGED_APP="$BUILD_ROOT/TrackPointD.app"
+BACKUP_APP="$BUILD_ROOT/TrackPointD.previous.app"
+INSTALL_COMPLETE=false
+APP_MOVED=false
+APP_BACKED_UP=false
 
-# ── 1. Compile (only if source changed) ───────────────────────
-mkdir -p "$APP/Contents/MacOS"
+stop_daemon() {
+    pkill -x trackpointd 2>/dev/null || true
+    for _ in {1..20}; do
+        pgrep -x trackpointd >/dev/null 2>&1 || return 0
+        sleep 0.05
+    done
+    pkill -KILL -x trackpointd 2>/dev/null || true
+}
 
-NEED_COMPILE=false
-if [ ! -f "$DAEMON_BIN" ]; then
-    NEED_COMPILE=true
-elif [ "$DAEMON_SRC" -nt "$DAEMON_BIN" ]; then
-    NEED_COMPILE=true
-fi
+cleanup() {
+    if ! $INSTALL_COMPLETE; then
+        if $APP_MOVED; then
+            stop_daemon
+            [ ! -e "$APP" ] || rm -rf -- "$APP"
+        fi
+        if $APP_BACKED_UP && [ -d "$BACKUP_APP" ]; then
+            mv "$BACKUP_APP" "$APP"
+            open -g "$APP" >/dev/null 2>&1 || true
+        fi
+    fi
+    case "$BUILD_ROOT" in
+        "${TMPDIR:-/tmp}"/trackpointd-install.*) rm -rf -- "$BUILD_ROOT" ;;
+    esac
+}
+trap cleanup EXIT
 
-# ── 2. Resources + Info.plist (before codesign) ─────────────────
-mkdir -p "$APP/Contents/Resources"
+log() { printf '[+] %s\n' "$1"; }
+
+printf '%s\n' '==============================' ' TrackPointD install / upgrade' '=============================='
+
+log 'Building a complete staged app...'
+mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
+clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
+    -o "$STAGED_APP/Contents/MacOS/trackpointd" "$SCRIPT_DIR/trackpointd.m" \
+    -framework Cocoa \
+    -framework ApplicationServices \
+    -framework IOKit \
+    -lm
+
 if [ -f "$SCRIPT_DIR/TrackPointD.icns" ]; then
-    cp "$SCRIPT_DIR/TrackPointD.icns" "$APP/Contents/Resources/TrackPointD.icns"
+    cp "$SCRIPT_DIR/TrackPointD.icns" "$STAGED_APP/Contents/Resources/TrackPointD.icns"
 fi
 
-cat > "$APP/Contents/Info.plist" << 'EOF'
+cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>     <string>com.user.trackpointd</string>
-    <key>CFBundleName</key>           <string>TrackPointD</string>
-    <key>CFBundleExecutable</key>     <string>trackpointd</string>
-    <key>CFBundleVersion</key>        <string>1.0</string>
-    <key>CFBundlePackageType</key>    <string>APPL</string>
-    <key>CFBundleIconFile</key>       <string>TrackPointD</string>
-    <key>LSUIElement</key>            <true/>
-    <key>NSPrincipalClass</key>       <string>NSApplication</string>
+    <key>CFBundleIdentifier</key>        <string>com.user.trackpointd</string>
+    <key>CFBundleName</key>              <string>TrackPointD</string>
+    <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
+    <key>CFBundleExecutable</key>        <string>trackpointd</string>
+    <key>CFBundleShortVersionString</key><string>2.0.0</string>
+    <key>CFBundleVersion</key>           <string>2</string>
+    <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>CFBundleIconFile</key>          <string>TrackPointD</string>
+    <key>LSMinimumSystemVersion</key>    <string>12.0</string>
+    <key>LSUIElement</key>               <true/>
+    <key>NSPrincipalClass</key>          <string>NSApplication</string>
 </dict>
 </plist>
-EOF
+PLIST
 
-if $NEED_COMPILE; then
-    log "Compiling..."
-    clang -O2 -fobjc-arc -o /tmp/trackpointd_build "$DAEMON_SRC" \
-        -framework Cocoa \
-        -framework ApplicationServices \
-        -framework IOKit \
-        -lm || { echo "Compile failed"; exit 1; }
-    install -m 755 /tmp/trackpointd_build "$DAEMON_BIN"
+plutil -lint "$STAGED_APP/Contents/Info.plist" >/dev/null
+"$STAGED_APP/Contents/MacOS/trackpointd" --self-test
+codesign --force --deep --sign - "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
 
-    log "Code signing..."
-    codesign --force --deep -s - "$APP"
-
-    # Signature changed — reset TCC (re-grant required)
-    log "Resetting accessibility permission (re-grant required)..."
-    tccutil reset Accessibility com.user.trackpointd 2>/dev/null || true
-else
-    log "Source unchanged — skipping recompile (signature preserved)"
+if $CHECK_ONLY; then
+    INSTALL_COMPLETE=true
+    log 'Build, self-test, property list, and code-signing checks passed.'
+    exit 0
 fi
 
-# Force Launch Services to re-index the bundle (icon refresh)
+log 'Installing verified app...'
+mkdir -p "$(dirname "$APP")"
+if [ -d "$APP" ]; then
+    APP_BACKED_UP=true
+    mv "$APP" "$BACKUP_APP"
+fi
+APP_MOVED=true
+mv "$STAGED_APP" "$APP"
+stop_daemon
+
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$APP" 2>/dev/null || true
 
-# ── 3. Mouse defaults ───────────────────────────────────────────
-log "Applying mouse defaults..."
-defaults write -g com.apple.mouse.scaling 5
-defaults write -g com.apple.mouse.linear 1
+open -g "$APP"
+INSTALL_COMPLETE=true
 
-# ── 4. Remove old LaunchAgent -> replace with Login Item ────────
-if [ -f "$OLD_PLIST" ]; then
-    launchctl unload "$OLD_PLIST" 2>/dev/null || true
-    rm -f "$OLD_PLIST"
-    log "Old LaunchAgent removed"
-fi
-
-log "Registering Login Item..."
-osascript << APPLESCRIPT
-tell application "System Events"
-    if (exists login item "TrackPointD") then
-        delete login item "TrackPointD"
-    end if
-    make login item at end with properties {path:"$APP", hidden:true}
-end tell
+log 'Registering Login Item...'
+if osascript - "$APP" <<'APPLESCRIPT'
+on run argv
+    set appPath to item 1 of argv
+    tell application "System Events"
+        if not (exists login item "TrackPointD") then
+            make login item at end with properties {path:appPath, hidden:true}
+        end if
+    end tell
+end run
 APPLESCRIPT
-
-# ── 5. Launch now ───────────────────────────────────────────────
-log "Launching app..."
-pkill -f "trackpointd" 2>/dev/null || true
-sleep 0.5
-open -g -a "$APP"
-
-echo ""
-echo -e "${GREEN}Done!${NC}"
-echo ""
-if $NEED_COMPILE; then
-    echo "  Source was recompiled — re-grant accessibility permission:"
-    echo "  System Settings -> Privacy & Security -> Accessibility"
-    echo "  -> Enable TrackPointD (toggle off and on if already listed)"
-    echo ""
+then
+    if [ -f "$OLD_PLIST" ]; then
+        launchctl unload "$OLD_PLIST" 2>/dev/null || true
+        rm -f -- "$OLD_PLIST" ||
+            printf '[!] Could not remove the legacy LaunchAgent: %s\n' "$OLD_PLIST" >&2
+    fi
+else
+    printf '[!] Could not register the Login Item. Add TrackPointD in Login Items manually.\n' >&2
 fi
-echo "Log: tail -f /tmp/trackpointd.log"
-echo "Uninstall: bash $SCRIPT_DIR/uninstall.sh"
+
+printf '\nDone. Grant both permissions if macOS asks:\n'
+printf '  System Settings → Privacy & Security → Accessibility → TrackPointD\n'
+printf '  System Settings → Privacy & Security → Input Monitoring → TrackPointD\n\n'
+printf 'Log: tail -f /tmp/trackpointd.log\n'
+printf 'Uninstall: bash %s/uninstall.sh\n' "$SCRIPT_DIR"
