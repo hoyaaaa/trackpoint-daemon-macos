@@ -59,6 +59,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
     -o "$STAGED_APP/Contents/MacOS/trackpointd" "$SCRIPT_DIR/trackpointd.m" \
     -framework Cocoa \
     -framework ApplicationServices \
+    -framework CoreAudio \
     -framework IOKit \
     -lm
 
@@ -76,8 +77,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>              <string>TrackPointD</string>
     <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
     <key>CFBundleExecutable</key>        <string>trackpointd</string>
-    <key>CFBundleShortVersionString</key><string>2.0.0</string>
-    <key>CFBundleVersion</key>           <string>2</string>
+    <key>CFBundleShortVersionString</key><string>2.1.0</string>
+    <key>CFBundleVersion</key>           <string>3</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>TrackPointD</string>
     <key>LSMinimumSystemVersion</key>    <string>12.0</string>

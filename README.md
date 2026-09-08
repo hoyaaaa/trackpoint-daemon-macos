@@ -6,6 +6,10 @@ drivers or third-party dependencies.
 
 ## Version 2 highlights
 
+- Rebuilds the settings window around Lenovo's Windows layout: an
+  `External TrackPoint Keyboard` page plus the original F12 `Modify…` flow.
+- Separates macOS permissions and platform-specific extras into a dedicated
+  `macOS Integration` page so they are not presented as Lenovo features.
 - Sends the keyboard's real hardware speed setting instead of pretending with
   a made-up acceleration curve.
 - Supports both official transports: USB receiver `17EF:60EE` and Bluetooth LE
@@ -15,6 +19,8 @@ drivers or third-party dependencies.
 - Adds the Windows F12 star-key actions: open up to four files/apps, open a web
   site, or type saved text.
 - Adds Fn Lock control and reapplies keyboard settings after reconnect or wake.
+- Maps the confirmed F4 and F8 vendor reports to default-input microphone mute
+  and macOS Notification Center.
 - Moves both modifier remaps to exact-device `hidutil` rules. Other keyboards
   and the user's global remaps are no longer touched.
 - Removes all global mouse acceleration/defaults changes.
@@ -26,6 +32,17 @@ drivers or third-party dependencies.
 ## Settings UI
 
 Click `TP+`, `TP-`, or `TP!` in the menu bar, then **Settings…**.
+
+The first tab follows Lenovo's Windows `Keyboard Properties → External
+TrackPoint Keyboard` page: keyboard graphic, nine-position `Slow`–`Fast`
+slider, Preferred Scrolling, and an F12 action summary with **Modify…**. The
+F12 editor mirrors the Windows mode picker and its files list with Add/Remove,
+URL field, text field, and OK/Cancel flow. Lenovo's proprietary artwork is not
+copied; the keyboard graphic is drawn from a macOS system symbol.
+
+The second tab contains the two required macOS permissions and all macOS-only
+options. Each permission has an explicit status and an **Open Settings…**
+button; macOS requires the user to approve access in System Settings.
 
 | Setting | What it does | Origin |
 |---|---|---|
@@ -74,10 +91,17 @@ shows a user-space stack rather than a custom kernel driver:
 | F9 Settings, F10 Bluetooth, F11 keyboard settings | Adapted to the equivalent macOS panes/UI |
 | Fn+PrtSc snipping tool | Adapted to macOS interactive screenshot |
 | Volume and brightness keys/OSD | Handled by macOS when the host exposes the standard usages |
-| Action Center, global mic mute, Win+P, SysRq/Break/Scroll Lock | Not emulated; no stable exact macOS equivalent |
-| Fn+4 sleep | Not intercepted; use the normal macOS sleep controls |
+| F4 microphone mute | Toggles the current default input through CoreAudio when that device exposes a writable mute control |
+| F8 Action Center | Adapted to macOS Notification Center using the documented Fn-N shortcut |
+| Win+P, SysRq/Break/Scroll Lock/Pause | Not emulated; no stable exact macOS equivalent |
+| Fn+4 sleep | Standard HID System Sleep report is left to macOS; no duplicate event is synthesized |
 | Swift Pair | Windows-only; use normal macOS Bluetooth pairing |
 | Pairing mode, LEDs, six-key assistive input | Keyboard firmware; no daemon implementation needed |
+
+So the Windows control panel's three configurable features are all present,
+but the complete Windows experience is not a 100% clone. Windows-only OS
+integrations and Lenovo OSD behavior remain intentionally outside the parity
+claim.
 
 Natural scrolling, modifier swaps, F18, adjustable scroll speed, and legacy
 Press-to-Select are useful macOS additions, not Lenovo Windows features.
@@ -159,7 +183,8 @@ before a report is used.
 ```bash
 clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
   -o /tmp/trackpointd trackpointd.m \
-  -framework Cocoa -framework ApplicationServices -framework IOKit -lm
+  -framework Cocoa -framework ApplicationServices -framework CoreAudio \
+  -framework IOKit -lm
 /tmp/trackpointd --self-test
 ```
 
