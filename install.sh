@@ -115,11 +115,21 @@ open -g "$APP"
 INSTALL_COMPLETE=true
 
 log 'Registering Login Item...'
-if osascript - "$APP" <<'APPLESCRIPT'
+if osascript - "$APP" >/dev/null <<'APPLESCRIPT'
 on run argv
     set appPath to item 1 of argv
     tell application "System Events"
-        if not (exists login item "TrackPointD") then
+        set needsCreate to true
+        if exists login item "TrackPointD" then
+            set existingItem to login item "TrackPointD"
+            if path of existingItem is appPath then
+                set hidden of existingItem to true
+                set needsCreate to false
+            else
+                delete existingItem
+            end if
+        end if
+        if needsCreate then
             make login item at end with properties {path:appPath, hidden:true}
         end if
     end tell
