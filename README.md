@@ -24,8 +24,8 @@ drivers or third-party dependencies.
 - Moves both modifier remaps to exact-device `hidutil` rules. Other keyboards
   and the user's global remaps are no longer touched.
 - Removes all global mouse acceleration/defaults changes.
-- Fixes the recursive middle-click event loop, event-tap state recovery, HID
-  queue lifetime, and Press-to-Select timing, distance, and re-arm bugs.
+- Fixes the recursive middle-click event loop, event-tap state recovery, and
+  Press-to-Select timing, distance, re-arm, and direct-input delivery bugs.
 - Replaces the in-place installer with build, self-test, sign, verify, then a
   staged replacement with rollback.
 
@@ -166,6 +166,7 @@ its **Modify events** mode takes exclusive ownership, so TrackPointD cannot
 confirm TrackPoint movement. In Karabiner-Elements → **Devices**, turn off
 **Modify events** for **TrackPoint Keyboard II**. TrackPointD supplies its own
 device-only modifier remaps; other keyboards can remain enabled in Karabiner.
+If `TP!` remains after moving the stick, quit and reopen TrackPointD once.
 
 ## Uninstall
 
@@ -188,7 +189,8 @@ other keyboard, global mouse setting, or privacy permission is changed.
 | Middle click | Hold pending; emit click only if no wheel report/movement occurred |
 | F12 and Lenovo hotkeys | Exact-device input-report callback |
 | Key remaps | `hidutil --matching` for this model only |
-| Software sensitivity fallback / PTS | One `kCGHIDEventTap`, fail-closed origin filter |
+| Emulated Press-to-Select | Manager-owned exact-device X/Y callback; no secondary HID queue |
+| Software sensitivity fallback | One `kCGHIDEventTap`, fail-closed origin filter |
 
 Configuration reports, independently reconstructed from public protocol facts:
 

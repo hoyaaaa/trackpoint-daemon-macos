@@ -4,7 +4,8 @@
  * Key remap: per-device hidutil — modifier swap and Right Option -> F18
  * Unified CGEventTap at kCGHIDEventTap:
  *   - Middle button → scroll (with accumulator + threshold)
- *   - Software sensitivity fallback and legacy press-to-select
+ *   - Software sensitivity fallback
+ * Exact-device HID value callback: emulated press-to-select
  * Detection/config: IOHIDManager, exact TrackPoint Keyboard II USB/BLE IDs
  *
  * Compile:
@@ -75,7 +76,6 @@ static bool    s_naturalScroll = false;
 static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
 static NSTimer      *s_imTimer = nil;       /* Input Monitoring permission poll timer */
-static NSTimer      *s_hidRetryTimer = nil;
 static IOHIDManagerRef s_hidManager = NULL;
 
 typedef NS_ENUM(NSInteger, TPF12Mode) {
@@ -91,8 +91,8 @@ static NSString *s_f12Text = @"";
 static NSArray<NSString *> *s_f12Files = @[];
 static bool s_accessibilityRequestAttempted = false;
 
-/* If a fresh ThinkPad HID value was seen within this window, treat event as ThinkPad.
- * Bridges the gap when queue is drained on event N and event N+1 arrives before next HID report. */
+/* If a fresh ThinkPad HID value was seen within this window, treat the
+ * corresponding CG event as coming from that exact device. */
 #define TP_RECENCY_NS  50000000ULL   /* 50ms */
 #define NATIVE_DUP_NS  15000000ULL   /* native report vs. compatibility event */
 
@@ -124,9 +124,7 @@ static CFRunLoopTimerRef s_pts_timer     = NULL;
 @interface TPHIDDevice : NSObject {
 @public
     IOHIDDeviceRef device;
-    IOHIDQueueRef queue;
-    uint8_t reportBuffer[64];
-    bool queueOK;
+    bool inputConfirmed;
     uint64_t lastPointerTime;
     uint64_t lastMiddleButtonTime;
     uint64_t lastNativeScrollTime;
@@ -135,15 +133,8 @@ static CFRunLoopTimerRef s_pts_timer     = NULL;
     bool nativeMiddleDown;
     bool nativeScrolled;
     bool rawMiddleDown;
-    bool opened;
-    bool scheduled;
-    bool removed;
-    bool openAttempted;
-    IOReturn lastOpenResult;
 }
 - (instancetype)initWithDevice:(IOHIDDeviceRef)hidDevice;
-- (void)buildQueue;
-- (void)detachForRemoval;
 - (void)resetAfterWake;
 @end
 
@@ -153,9 +144,15 @@ static int tp_count(void) {
     return (int)s_tpDevices.count;
 }
 
-static bool tp_has_input_queue(void) {
+static TPHIDDevice *tp_context_for_device(IOHIDDeviceRef device) {
     for (TPHIDDevice *ctx in s_tpDevices)
-        if (ctx->queue) return true;
+        if (ctx->device == device) return ctx;
+    return nil;
+}
+
+static bool tp_has_direct_input(void) {
+    for (TPHIDDevice *ctx in s_tpDevices)
+        if (ctx->inputConfirmed) return true;
     return false;
 }
 
@@ -174,14 +171,18 @@ static double sensitivity_factor(void) {
 }
 
 static void try_create_event_tap(void);
-static void try_build_queue_for_devices(void);
 static void setup_hid(void);
+static void refresh_ui(void);
 static void apply_key_remap(void);
 static void apply_hardware_settings(void);
 static void cancel_pts(void);
 static void cancel_pts_gesture(void);
 static void reset_gesture_state(void);
 static void reset_compatibility_middle(void);
+static TPPTSAction pts_on_move(TPPTSState *state, uint64_t nowNs,
+                               double distance, CGPoint position,
+                               bool mayStart);
+static void schedule_pts_timer(uint64_t delayNs);
 static NSURL *validated_http_url(NSString *value);
 static void run_f12_action(void);
 static bool toggle_default_input_mute(void);
@@ -300,9 +301,10 @@ static bool decode_middle_report(uint32_t reportID, const uint8_t *report,
 static void hid_report(void *context, IOReturn result, void *sender,
                        IOHIDReportType type, uint32_t reportID,
                        uint8_t *report, CFIndex reportLength) {
-    (void)sender;
+    (void)context;
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput) return;
-    TPHIDDevice *ctx = (__bridge TPHIDDevice *)context;
+    TPHIDDevice *ctx = tp_context_for_device((IOHIDDeviceRef)sender);
+    if (!ctx) return;
 
     /* Report 5 carries a Lenovo hotkey usage (second byte is padding on BLE). */
     if (reportID == 0x05) {
@@ -324,6 +326,7 @@ static void hid_report(void *context, IOReturn result, void *sender,
     if (s_preferredScroll && decode_wheel_report(reportID, report, reportLength,
                                                  &horizontal, &vertical)) {
         if (horizontal == 0 && vertical == 0) return;
+        cancel_pts_gesture();
         bool isBLE = device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID;
         int sign = s_naturalScroll ? -1 : 1;
         int32_t verticalPixels = isBLE ? 0 :
@@ -356,14 +359,54 @@ static void hid_report(void *context, IOReturn result, void *sender,
 
 static void hid_value(void *context, IOReturn result, void *sender,
                       IOHIDValueRef value) {
-    (void)sender;
+    (void)context; (void)sender;
     if (result != kIOReturnSuccess) return;
     IOHIDElementRef element = IOHIDValueGetElement(value);
-    if (IOHIDElementGetUsagePage(element) == 0xFFA0 &&
-        IOHIDElementGetUsage(element) == 0xFB) {
-        TPHIDDevice *ctx = (__bridge TPHIDDevice *)context;
+    TPHIDDevice *ctx = tp_context_for_device(IOHIDElementGetDevice(element));
+    if (!ctx) return;
+    uint32_t page = IOHIDElementGetUsagePage(element);
+    uint32_t usage = IOHIDElementGetUsage(element);
+    CFIndex integerValue = IOHIDValueGetIntegerValue(value);
+
+    if (page == kHIDPage_GenericDesktop &&
+        (usage == kHIDUsage_GD_X || usage == kHIDUsage_GD_Y) &&
+        integerValue != 0) {
+        uint64_t now = mach_absolute_time();
+        uint64_t valueTime = IOHIDValueGetTimeStamp(value);
+        if (valueTime == 0) valueTime = now;
+        ctx->lastPointerTime = now;
+        if (!ctx->inputConfirmed) {
+            ctx->inputConfirmed = true;
+            LOG("direct HID input confirmed — exact-device filtering active");
+            dispatch_async(dispatch_get_main_queue(), ^{ refresh_ui(); });
+        }
+
+        if (s_ptsEnabled && !ctx->rawMiddleDown && !ctx->nativeMiddleDown) {
+            CGEventRef current = CGEventCreate(NULL);
+            CGPoint position = current ? CGEventGetLocation(current) : CGPointZero;
+            if (current) CFRelease(current);
+            cancel_pts();
+            TPPTSAction action = pts_on_move(&s_ptsState,
+                                              mach_time_to_ns(valueTime),
+                                              fabs((double)integerValue),
+                                              position, true);
+            if (action == TPPTSArmTimer) schedule_pts_timer(PTS_STOP_DELAY_NS);
+        } else if (s_ptsEnabled) {
+            cancel_pts_gesture();
+        }
+        return;
+    }
+
+    if (page == kHIDPage_Button && integerValue != 0)
+        cancel_pts_gesture();
+    if (page == kHIDPage_Button && usage == 3) {
+        ctx->lastMiddleButtonTime = mach_absolute_time();
+        ctx->rawMiddleDown = integerValue != 0;
+    }
+
+    if (page == 0xFFA0 && usage == 0xFB) {
         if (s_preferredScroll)
-            native_middle_changed(ctx, IOHIDValueGetIntegerValue(value) != 0);
+            native_middle_changed(ctx, integerValue != 0);
     }
 }
 
@@ -393,8 +436,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     self = [super init];
     if (!self) return nil;
     device = (IOHIDDeviceRef)CFRetain(hidDevice);
-    queue = NULL;
-    queueOK = false;
+    inputConfirmed = false;
     lastPointerTime = 0;
     lastMiddleButtonTime = 0;
     lastNativeScrollTime = 0;
@@ -403,124 +445,20 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     nativeMiddleDown = false;
     nativeScrolled = false;
     rawMiddleDown = false;
-    opened = false;
-    scheduled = false;
-    removed = false;
-    openAttempted = false;
-    lastOpenResult = kIOReturnSuccess;
-    memset(reportBuffer, 0, sizeof(reportBuffer));
     return self;
 }
 
-- (void)buildQueue {
-    if (queue) return;
-    if (!opened) {
-        IOReturn openRet = IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone);
-        if (!openAttempted || openRet != lastOpenResult)
-            LOG("IOHIDDeviceOpen: 0x%08X (%s)", (unsigned int)openRet,
-                openRet == kIOReturnSuccess ? "ok" :
-                openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
-        openAttempted = true;
-        lastOpenResult = openRet;
-        if (openRet != kIOReturnSuccess) {
-            if (openRet == kIOReturnExclusiveAccess)
-                LOG("direct input blocked by another input app; in Karabiner, "
-                    "turn off Modify events for TrackPoint Keyboard II");
-            return;
-        }
-        opened = true;
-    }
-    if (!scheduled) {
-        IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
-            (CFIndex)sizeof(reportBuffer), hid_report, (__bridge void *)self);
-        IOHIDDeviceRegisterInputValueCallback(device, hid_value, (__bridge void *)self);
-        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-        scheduled = true;
-    }
-
-    CFArrayRef elems = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
-    CFIndex total = elems ? CFArrayGetCount(elems) : 0;
-    if (total == 0) {
-        if (elems) CFRelease(elems);
-        return;
-    }
-
-    IOHIDQueueRef newQueue = IOHIDQueueCreate(kCFAllocatorDefault, device, 64,
-                                               kIOHIDOptionsTypeNone);
-    int added = 0;
-    if (newQueue) {
-        for (CFIndex i = 0; i < total; i++) {
-            IOHIDElementRef elem = (IOHIDElementRef)CFArrayGetValueAtIndex(elems, i);
-            uint32_t page = IOHIDElementGetUsagePage(elem);
-            uint32_t usage = IOHIDElementGetUsage(elem);
-            if ((page == kHIDPage_GenericDesktop &&
-                 (usage == kHIDUsage_GD_X || usage == kHIDUsage_GD_Y)) ||
-                (page == kHIDPage_Button && usage == 3)) {
-                IOHIDQueueAddElement(newQueue, elem);
-                added++;
-            }
-        }
-    }
-    if (elems) CFRelease(elems);
-    if (newQueue && added > 0) {
-        IOHIDQueueStart(newQueue);
-        queue = newQueue;
-        LOG("HID queue created with %d pointer elements", added);
-    } else if (newQueue) {
-        CFRelease(newQueue);
-    }
-}
-
-- (void)detachForRemoval {
-    removed = true;
-    if (queue) {
-        IOHIDQueueStop(queue);
-        CFRelease(queue);
-        queue = NULL;
-    }
-    if (device && scheduled) {
-        IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
-            (CFIndex)sizeof(reportBuffer), NULL, (__bridge void *)self);
-        IOHIDDeviceRegisterInputValueCallback(device, NULL, (__bridge void *)self);
-        IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(),
-                                          kCFRunLoopCommonModes);
-        scheduled = false;
-    }
-    /* Closing an already-removed IOHIDDevice is unsafe on some macOS releases. */
-    opened = false;
-}
-
 - (void)resetAfterWake {
+    inputConfirmed = false;
     lastPointerTime = 0;
     lastMiddleButtonTime = 0;
     lastNativeScrollTime = 0;
     lastNativeMiddleTime = 0;
     lastHotkey = 0;
-    if (!queue) return;
-    IOHIDQueueStop(queue);
-    IOHIDValueRef stale;
-    while ((stale = IOHIDQueueCopyNextValueWithTimeout(queue, 0)) != NULL)
-        CFRelease(stale);
-    IOHIDQueueStart(queue);
 }
 
 - (void)dealloc {
-    if (queue) {
-        IOHIDQueueStop(queue);
-        CFRelease(queue);
-    }
-    if (device) {
-        if (!removed) {
-            IOHIDDeviceRegisterInputReportCallback(device, reportBuffer,
-                (CFIndex)sizeof(reportBuffer), NULL, (__bridge void *)self);
-            IOHIDDeviceRegisterInputValueCallback(device, NULL, (__bridge void *)self);
-            if (scheduled)
-                IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetMain(),
-                                                  kCFRunLoopCommonModes);
-            if (opened) IOHIDDeviceClose(device, kIOHIDOptionsTypeNone);
-        }
-        CFRelease(device);
-    }
+    if (device) CFRelease(device);
 }
 
 @end
@@ -789,14 +727,14 @@ static SettingsWindowController *g_settings = nil;
 - (void)syncState {
     BOOL accessible = AXIsProcessTrusted();
     BOOL connected  = tp_count() > 0;
-    BOOL directInput = tp_has_input_queue();
+    BOOL directInput = tp_has_direct_input();
     if (accessible) s_accessibilityRequestAttempted = true;
 
     if (!connected) {
         self.keyboardStatus.stringValue = @"Keyboard: Disconnected";
         self.keyboardStatus.textColor = [NSColor secondaryLabelColor];
     } else if (!directInput) {
-        self.keyboardStatus.stringValue = @"Keyboard: Connected — direct input is blocked";
+        self.keyboardStatus.stringValue = @"Keyboard: Connected — move TrackPoint to verify input";
         self.keyboardStatus.textColor = [NSColor systemOrangeColor];
     } else {
         self.keyboardStatus.stringValue = [NSString stringWithFormat:
@@ -827,7 +765,7 @@ static SettingsWindowController *g_settings = nil;
     self.preferredCheck.state = s_preferredScroll ? NSControlStateValueOn : NSControlStateValueOff;
     self.ptsCheck.state  = s_ptsEnabled  ? NSControlStateValueOn : NSControlStateValueOff;
     self.ptsCheck.toolTip = connected && !directInput
-        ? @"Another input app owns this keyboard. In Karabiner-Elements → Devices, turn off Modify events for TrackPoint Keyboard II."
+        ? @"Move the TrackPoint once. If this remains, turn off Modify events for this keyboard in Karabiner-Elements → Devices, then reopen TrackPointD."
         : @"Keyboard II has no pressure signal. A short, small stick movement followed by a stop is treated as a left click.";
 
     self.slider.integerValue = s_sensitivity;
@@ -1304,8 +1242,9 @@ static AppDelegate *g_app = nil;
     NSNumber *scrollPref = [[NSUserDefaults standardUserDefaults]
         objectForKey:@"com.apple.swipescrolldirection"];
     s_naturalScroll = (scrollPref == nil) ? true : scrollPref.boolValue;
-    try_build_queue_for_devices();
+    apply_hardware_settings();
     apply_key_remap();
+    [self refresh];
     LOG("settings reapplied after wake");
 }
 
@@ -1313,8 +1252,6 @@ static AppDelegate *g_app = nil;
     (void)notification;
     [self.accessTimer invalidate];
     [s_imTimer invalidate];
-    [s_hidRetryTimer invalidate];
-    s_hidRetryTimer = nil;
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
     cancel_pts();
     reset_gesture_state();
@@ -1331,13 +1268,13 @@ static AppDelegate *g_app = nil;
         CFRelease(s_tapSource); s_tapSource = NULL;
     }
     if (s_tap) { CFRelease(s_tap); s_tap = NULL; }
-    [s_tpDevices removeAllObjects];
     if (s_hidManager) {
         IOHIDManagerUnscheduleFromRunLoop(s_hidManager, CFRunLoopGetMain(),
                                            kCFRunLoopCommonModes);
         IOHIDManagerClose(s_hidManager, kIOHIDOptionsTypeNone);
         CFRelease(s_hidManager); s_hidManager = NULL;
     }
+    [s_tpDevices removeAllObjects];
 }
 
 - (void)buildMenu {
@@ -1367,7 +1304,7 @@ static AppDelegate *g_app = nil;
     BOOL accessible = AXIsProcessTrusted();
     BOOL inputAllowed = input_monitoring_granted();
     BOOL connected  = tp_count() > 0;
-    BOOL directInput = !connected || tp_has_input_queue();
+    BOOL directInput = !connected || tp_has_direct_input();
 
     self.statusItem.button.title = (!accessible || !inputAllowed || !directInput) ? @"TP!" :
                                     connected   ? @"TP+" : @"TP-";
@@ -1392,16 +1329,9 @@ static AppDelegate *g_app = nil;
 
 - (void)pollIM:(NSTimer *)t {
     if (input_monitoring_granted()) {
-        LOG("Input Monitoring: granted — building per-device queue");
+        LOG("Input Monitoring: granted — starting direct device input");
         [t invalidate]; s_imTimer = nil;
         if (!s_hidManager) setup_hid();
-        try_build_queue_for_devices();
-        BOOL needsRetry = NO;
-        for (TPHIDDevice *ctx in s_tpDevices) needsRetry |= ctx->queue == NULL;
-        if (needsRetry) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
-                           dispatch_get_main_queue(), ^{ try_build_queue_for_devices(); });
-        }
         [self refresh];
     }
 }
@@ -1429,6 +1359,10 @@ static AppDelegate *g_app = nil;
 }
 
 @end
+
+static void refresh_ui(void) {
+    [g_app refresh];
+}
 
 /* ══════════════════════════════════════════════════════════════
    hidutil — kernel-level key remap
@@ -1472,7 +1406,6 @@ static void apply_key_remap(void) {
 static void apply_hardware_settings(void) {
     bool sensitivityApplied = false;
     for (TPHIDDevice *ctx in s_tpDevices) {
-        if (!ctx->opened) continue;
         sensitivityApplied |= send_config_command(ctx->device, 0x02,
                                                    (uint8_t)s_sensitivity);
         send_config_command(ctx->device, 0x05, s_fnLock ? 1 : 0);
@@ -1744,7 +1677,6 @@ static TPPTSAction pts_on_idle(TPPTSState *state, uint64_t nowNs,
 /* ══════════════════════════════════════════════════════════════
    Press-to-select: emulate a left click after a brief stick tap
    ══════════════════════════════════════════════════════════════ */
-static void schedule_pts_timer(uint64_t delayNs);
 
 static void pts_fire(CFRunLoopTimerRef timer, void *info) {
     (void)info;
@@ -1785,7 +1717,6 @@ static void schedule_pts_timer(uint64_t delayNs) {
 }
 
 typedef struct {
-    bool fresh;
     bool fromTrackPoint;
     bool middleButtonDownRecent;
     bool nativeScrollRecent;
@@ -1806,41 +1737,12 @@ static uint64_t mach_time_to_ns(uint64_t ticks) {
     return ticks * timebase.numer / timebase.denom;
 }
 
-static TPOrigin poll_trackpoint_origin(CGEventTimestamp eventTimeNs) {
-    TPOrigin origin = {false, false, false, false, false, false};
+static TPOrigin poll_trackpoint_origin(void) {
+    TPOrigin origin = {0};
     uint64_t now = mach_absolute_time();
     for (TPHIDDevice *ctx in s_tpDevices) {
-        if (ctx->queue) {
-            IOHIDValueRef value;
-            while ((value = IOHIDQueueCopyNextValueWithTimeout(ctx->queue, 0)) != NULL) {
-                uint64_t valueTime = IOHIDValueGetTimeStamp(value);
-                uint64_t valueTimeNs = mach_time_to_ns(valueTime);
-                bool freshForEvent = eventTimeNs != 0
-                    ? valueTimeNs <= eventTimeNs &&
-                      eventTimeNs - valueTimeNs < NATIVE_DUP_NS
-                    : elapsed_ns(now, valueTime) < NATIVE_DUP_NS;
-                if (freshForEvent) {
-                    IOHIDElementRef element = IOHIDValueGetElement(value);
-                    uint32_t page = IOHIDElementGetUsagePage(element);
-                    uint32_t usage = IOHIDElementGetUsage(element);
-                    if (page == kHIDPage_GenericDesktop &&
-                        (usage == kHIDUsage_GD_X || usage == kHIDUsage_GD_Y) &&
-                        IOHIDValueGetIntegerValue(value) != 0) {
-                        origin.fresh = true;
-                        ctx->lastPointerTime = now;
-                    } else if (page == kHIDPage_Button && usage == 3) {
-                        ctx->lastMiddleButtonTime = now;
-                        ctx->rawMiddleDown = IOHIDValueGetIntegerValue(value) != 0;
-                    }
-                    if (!ctx->queueOK) {
-                        ctx->queueOK = true;
-                        LOG("HID queue confirmed — exact-device filtering active");
-                    }
-                }
-                CFRelease(value);
-            }
-        }
-        if (ctx->queueOK && elapsed_ns(now, ctx->lastPointerTime) < TP_RECENCY_NS)
+        if (ctx->inputConfirmed &&
+            elapsed_ns(now, ctx->lastPointerTime) < TP_RECENCY_NS)
             origin.fromTrackPoint = true;
         if (ctx->rawMiddleDown &&
             elapsed_ns(now, ctx->lastMiddleButtonTime) < TP_RECENCY_NS)
@@ -1882,7 +1784,7 @@ static CGPoint clamp_to_active_display(CGPoint point) {
 
 /* ══════════════════════════════════════════════════════════════
    Unified CGEventTap at kCGHIDEventTap
-   Handles: Preferred Scrolling fallback, software sensitivity fallback, PTS
+   Handles: Preferred Scrolling fallback and software sensitivity fallback
    ══════════════════════════════════════════════════════════════ */
 static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                                     CGEventRef event, void *refcon) {
@@ -1903,8 +1805,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                   type == kCGEventOtherMouseDragged;
     bool isOtherButton = type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp;
     TPOrigin origin = (isMove || isOtherButton)
-        ? poll_trackpoint_origin(CGEventGetTimestamp(event))
-                                                : (TPOrigin){0};
+        ? poll_trackpoint_origin() : (TPOrigin){0};
 
     if (type == kCGEventScrollWheel) {
         /* BLE emits a standard vertical wheel event in addition to its raw
@@ -2012,13 +1913,9 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
         CGEventSetDoubleValueField(event, kCGMouseEventDeltaY, scaledY);
     }
 
-    if (s_ptsEnabled && type == kCGEventMouseMoved) {
-        double distance = hypot(dx, dy);
-        cancel_pts();
-        TPPTSAction action = pts_on_move(&s_ptsState, monotonic_time_ns(),
-                                         distance, newPosition, origin.fresh);
-        if (action == TPPTSArmTimer) schedule_pts_timer(PTS_STOP_DELAY_NS);
-    }
+    if (s_ptsEnabled && origin.fromTrackPoint &&
+        s_ptsState.phase != TPPTSIdle)
+        s_ptsState.position = newPosition;
 
     return event;
 }
@@ -2069,40 +1966,6 @@ static void try_create_event_tap(void) {
    IOHIDManager — ThinkPad connection detection
    ══════════════════════════════════════════════════════════════ */
 
-/* Attempt to open stored ThinkPad devices and build queue.
- * Called at startup and whenever Input Monitoring permission is detected. */
-static void update_hid_retry_timer(void);
-
-static void try_build_queue_for_devices(void) {
-    for (TPHIDDevice *ctx in [s_tpDevices copy]) [ctx buildQueue];
-    apply_hardware_settings();
-    update_hid_retry_timer();
-}
-
-static void update_hid_retry_timer(void) {
-    bool needsRetry = false;
-    for (TPHIDDevice *ctx in s_tpDevices) {
-        if (!ctx->queue) {
-            needsRetry = true;
-            break;
-        }
-    }
-
-    if (!needsRetry) {
-        [s_hidRetryTimer invalidate];
-        s_hidRetryTimer = nil;
-        return;
-    }
-    if (s_hidRetryTimer) return;
-
-    s_hidRetryTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES
-        block:^(NSTimer *timer) {
-            (void)timer;
-            try_build_queue_for_devices();
-            [g_app refresh];
-        }];
-}
-
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
     if (!is_trackpoint_keyboard_ii(dev)) return;
@@ -2111,9 +1974,7 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
 
     TPHIDDevice *deviceContext = [[TPHIDDevice alloc] initWithDevice:dev];
     [s_tpDevices addObject:deviceContext];
-    [deviceContext buildQueue];
     apply_hardware_settings();
-    update_hid_retry_timer();
     LOG("TrackPoint Keyboard II connected pid=%04X",
         (unsigned int)device_number(dev, CFSTR(kIOHIDProductIDKey)));
     set_tap_enabled(true);
@@ -2125,11 +1986,9 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
         ^BOOL(TPHIDDevice *candidate, NSUInteger idx, BOOL *stop) {
             (void)idx; (void)stop;
             return candidate->device == dev;
-        }];
+    }];
     if (index == NSNotFound) return;
-    [s_tpDevices[index] detachForRemoval];
     [s_tpDevices removeObjectAtIndex:index];
-    update_hid_retry_timer();
     reset_gesture_state();
     s_hardwareSensitivity = false;
     if (tp_count() > 0) apply_hardware_settings();
@@ -2145,12 +2004,25 @@ static void setup_hid(void) {
         @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_BLE_PID)},
     ];
     IOHIDManagerSetDeviceMatchingMultiple(s_hidManager, (__bridge CFArrayRef)matches);
+    NSArray *inputMatches = @[
+        @{@kIOHIDElementUsagePageKey: @(kHIDPage_GenericDesktop),
+          @kIOHIDElementUsageKey: @(kHIDUsage_GD_X)},
+        @{@kIOHIDElementUsagePageKey: @(kHIDPage_GenericDesktop),
+          @kIOHIDElementUsageKey: @(kHIDUsage_GD_Y)},
+        @{@kIOHIDElementUsagePageKey: @(kHIDPage_Button)},
+        @{@kIOHIDElementUsagePageKey: @0xFFA0,
+          @kIOHIDElementUsageKey: @0xFB},
+    ];
+    IOHIDManagerSetInputValueMatchingMultiple(s_hidManager,
+                                               (__bridge CFArrayRef)inputMatches);
     IOHIDManagerRegisterDeviceMatchingCallback(s_hidManager, hid_added, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(s_hidManager, hid_removed, NULL);
+    IOHIDManagerRegisterInputReportCallback(s_hidManager, hid_report, NULL);
+    IOHIDManagerRegisterInputValueCallback(s_hidManager, hid_value, NULL);
     IOHIDManagerScheduleWithRunLoop(s_hidManager, CFRunLoopGetMain(),
                                      kCFRunLoopCommonModes);
     IOReturn result = IOHIDManagerOpen(s_hidManager, kIOHIDOptionsTypeNone);
-    LOG("HID manager: 0x%08X", (unsigned int)result);
+    LOG("HID manager direct callbacks: 0x%08X", (unsigned int)result);
 }
 
 /* ══════════════════════════════════════════════════════════════

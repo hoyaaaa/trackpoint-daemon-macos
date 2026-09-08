@@ -17,12 +17,12 @@ Do not broaden matching to every Lenovo device.
 ```text
 IOHIDManager (exact VID/PID)
   ├─ IOHIDDeviceSetReport → speed, Fn Lock, Preferred Scrolling
-  ├─ native input reports → wheel, deferred middle click, Lenovo hotkeys/F12
-  └─ one queue per device → origin confirmation
+  ├─ manager-owned input reports → wheel, deferred middle click, Lenovo hotkeys/F12
+  └─ manager-owned exact-device X/Y values → origin confirmation and PTS
 
 hidutil --matching → device-only modifier/F18 remaps
 
-one kCGHIDEventTap → compatibility scroll fallback, software speed fallback, PTS
+one kCGHIDEventTap → compatibility scroll fallback and software speed fallback
 ```
 
 ## Protocol contract
@@ -56,7 +56,10 @@ hardware evidence.
 - Unknown event origin fails closed. The one exception is an already-consumed,
   exact-device compatibility middle gesture: swallow unattributed moves until
   its release rather than leaking an orphan drag to applications.
-- Each physical IOHID device owns its queue, report buffer, and timestamps.
+- Register manager callbacks before scheduling/opening it. Do not double-open,
+  double-schedule, or create a second input queue for a matched device.
+- Resolve a value callback's device through `IOHIDElementGetDevice()`; older
+  IOKit versions pass their internal queue as that callback's `sender`.
 - Cancel and release every PTS timer on replacement, disconnect, timeout, and
   termination.
 - Do not write global mouse defaults or global acceleration properties.
