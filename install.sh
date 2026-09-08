@@ -22,6 +22,26 @@ BACKUP_APP="$BUILD_ROOT/TrackPointD.previous.app"
 INSTALL_COMPLETE=false
 APP_MOVED=false
 APP_BACKED_UP=false
+SIGNING_IDENTITY="${TRACKPOINTD_SIGN_IDENTITY:-}"
+if [ -z "$SIGNING_IDENTITY" ]; then
+    AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    EXISTING_AUTHORITY=""
+    if [ -d "$APP" ]; then
+        EXISTING_AUTHORITY="$({ codesign -dv --verbose=4 "$APP" 2>&1 || true; } |
+            awk -F= '/^Authority=/{print substr($0, index($0, "=") + 1); exit}')"
+    fi
+    if [ -n "$EXISTING_AUTHORITY" ] &&
+       [[ "$AVAILABLE_IDENTITIES" == *\"$EXISTING_AUTHORITY\"* ]]; then
+        SIGNING_IDENTITY="$EXISTING_AUTHORITY"
+    else
+        SIGNING_IDENTITY="$(printf '%s\n' "$AVAILABLE_IDENTITIES" | awk '
+        /"Developer ID Application:/ && !developer_id { developer_id=$2 }
+        /"Apple Development:/ && !development { development=$2 }
+        END { if (developer_id) print developer_id; else if (development) print development }
+        ')"
+    fi
+fi
+[ -n "$SIGNING_IDENTITY" ] || SIGNING_IDENTITY="-"
 
 stop_daemon() {
     pkill -x trackpointd 2>/dev/null || true
@@ -77,8 +97,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>              <string>TrackPointD</string>
     <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
     <key>CFBundleExecutable</key>        <string>trackpointd</string>
-    <key>CFBundleShortVersionString</key><string>2.1.0</string>
-    <key>CFBundleVersion</key>           <string>3</string>
+    <key>CFBundleShortVersionString</key><string>2.1.1</string>
+    <key>CFBundleVersion</key>           <string>4</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>TrackPointD</string>
     <key>LSMinimumSystemVersion</key>    <string>12.0</string>
@@ -90,7 +110,12 @@ PLIST
 
 plutil -lint "$STAGED_APP/Contents/Info.plist" >/dev/null
 "$STAGED_APP/Contents/MacOS/trackpointd" --self-test
-codesign --force --deep --sign - "$STAGED_APP"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    log 'Code signing: ad-hoc (permissions may need approval again after upgrades).'
+else
+    log 'Code signing: stable local Apple identity.'
+fi
+codesign --force --deep --sign "$SIGNING_IDENTITY" "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
 
 if $CHECK_ONLY; then
@@ -146,8 +171,8 @@ else
     printf '[!] Could not register the Login Item. Add TrackPointD in Login Items manually.\n' >&2
 fi
 
-printf '\nDone. Grant both permissions if macOS asks:\n'
-printf '  System Settings → Privacy & Security → Accessibility → TrackPointD\n'
-printf '  System Settings → Privacy & Security → Input Monitoring → TrackPointD\n\n'
+printf '\nDone. If the menu bar shows TP!, open:\n'
+printf '  TP! → Settings… → macOS Integration → Request Access…\n'
+printf 'macOS registers TrackPointD and opens the correct privacy pane; you approve the final switch.\n\n'
 printf 'Log: tail -f /tmp/trackpointd.log\n'
 printf 'Uninstall: bash %s/uninstall.sh\n' "$SCRIPT_DIR"

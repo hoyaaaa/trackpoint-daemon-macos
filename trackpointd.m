@@ -17,6 +17,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreAudio/CoreAudio.h>
 #import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 #import <math.h>
 #import <mach/mach_time.h>
 #import <assert.h>
@@ -86,6 +87,7 @@ static TPF12Mode s_f12Mode = TPF12OpenURL;
 static NSString *s_f12URL = @"https://support.lenovo.com/accessories/trackpoint_keyboard";
 static NSString *s_f12Text = @"";
 static NSArray<NSString *> *s_f12Files = @[];
+static bool s_accessibilityRequestAttempted = false;
 
 /* If a fresh ThinkPad HID value was seen within this window, treat event as ThinkPad.
  * Bridges the gap when queue is drained on event N and event N+1 arrives before next HID report. */
@@ -131,6 +133,14 @@ static int tp_count(void) {
     return (int)s_tpDevices.count;
 }
 
+static IOHIDAccessType input_monitoring_access(void) {
+    return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
+}
+
+static bool input_monitoring_granted(void) {
+    return input_monitoring_access() == kIOHIDAccessTypeGranted;
+}
+
 /* sensitivity 1-9 -> scale factor via exponential curve
    1 -> ~0.37x, 5 -> 1.0x, 9 -> ~2.72x */
 static double sensitivity_factor(void) {
@@ -149,6 +159,7 @@ static NSURL *validated_http_url(NSString *value);
 static void run_f12_action(void);
 static bool toggle_default_input_mute(void);
 static void show_notification_center(void);
+static void open_privacy_settings(NSString *pane);
 static void handle_hotkey(uint16_t usage);
 static void post_middle_click(CGPoint point);
 static uint64_t elapsed_ns(uint64_t now, uint64_t then);
@@ -666,24 +677,24 @@ static SettingsWindowController *g_settings = nil;
     self.accessStatus.font = [NSFont systemFontOfSize:12];
     self.accessStatus.frame = NSMakeRect(14, 75, 280, 18);
     [permissionsBox addSubview:self.accessStatus];
-    self.accessibilityBtn = [NSButton buttonWithTitle:@"Open Settings…" target:self
-                                               action:@selector(openAccessibility:)];
+    self.accessibilityBtn = [NSButton buttonWithTitle:@"Request Access…" target:self
+                                               action:@selector(requestAccessibility:)];
     self.accessibilityBtn.bezelStyle = NSBezelStyleRounded;
-    self.accessibilityBtn.frame = NSMakeRect(316, 68, 120, 28);
+    self.accessibilityBtn.frame = NSMakeRect(300, 68, 136, 28);
     [permissionsBox addSubview:self.accessibilityBtn];
 
     self.inputStatus = [NSTextField labelWithString:@""];
     self.inputStatus.font = [NSFont systemFontOfSize:12];
     self.inputStatus.frame = NSMakeRect(14, 42, 280, 18);
     [permissionsBox addSubview:self.inputStatus];
-    self.inputMonitoringBtn = [NSButton buttonWithTitle:@"Open Settings…" target:self
-                                                 action:@selector(openInputMonitoring:)];
+    self.inputMonitoringBtn = [NSButton buttonWithTitle:@"Request Access…" target:self
+                                                 action:@selector(requestInputMonitoring:)];
     self.inputMonitoringBtn.bezelStyle = NSBezelStyleRounded;
-    self.inputMonitoringBtn.frame = NSMakeRect(316, 35, 120, 28);
+    self.inputMonitoringBtn.frame = NSMakeRect(300, 35, 136, 28);
     [permissionsBox addSubview:self.inputMonitoringBtn];
 
     NSTextField *permissionHelp = [NSTextField labelWithString:
-        @"TrackPointD can open these panes, but only you can approve access."];
+        @"Request Access registers TrackPointD; only you can approve it in macOS."];
     permissionHelp.font = [NSFont systemFontOfSize:10];
     permissionHelp.textColor = [NSColor secondaryLabelColor];
     permissionHelp.frame = NSMakeRect(14, 13, 422, 16);
@@ -742,6 +753,7 @@ static SettingsWindowController *g_settings = nil;
 - (void)syncState {
     BOOL accessible = AXIsProcessTrusted();
     BOOL connected  = tp_count() > 0;
+    if (accessible) s_accessibilityRequestAttempted = true;
 
     self.keyboardStatus.stringValue = connected
         ? [NSString stringWithFormat:@"Keyboard: Connected (%@ sensitivity)",
@@ -749,15 +761,21 @@ static SettingsWindowController *g_settings = nil;
         : @"Keyboard: Disconnected";
     self.keyboardStatus.textColor   = connected  ? [NSColor systemGreenColor]   : [NSColor secondaryLabelColor];
 
-    BOOL inputAllowed = CGPreflightListenEventAccess();
-    self.accessStatus.stringValue = accessible
-        ? @"Accessibility: ✓ Allowed" : @"Accessibility: Action required";
+    IOHIDAccessType inputAccess = input_monitoring_access();
+    BOOL inputAllowed = inputAccess == kIOHIDAccessTypeGranted;
+    self.accessStatus.stringValue = accessible ? @"Accessibility: ✓ Allowed" :
+        (s_accessibilityRequestAttempted ? @"Accessibility: Not allowed" : @"Accessibility: Not requested");
     self.accessStatus.textColor = accessible
         ? [NSColor systemGreenColor] : [NSColor systemOrangeColor];
-    self.inputStatus.stringValue = inputAllowed
-        ? @"Input Monitoring: ✓ Allowed" : @"Input Monitoring: Action required";
+    self.inputStatus.stringValue = inputAllowed ? @"Input Monitoring: ✓ Allowed" :
+        (inputAccess == kIOHIDAccessTypeDenied
+            ? @"Input Monitoring: Not allowed" : @"Input Monitoring: Not requested");
     self.inputStatus.textColor = inputAllowed
         ? [NSColor systemGreenColor] : [NSColor systemOrangeColor];
+    self.accessibilityBtn.title = accessible || s_accessibilityRequestAttempted
+        ? @"Open Settings…" : @"Request Access…";
+    self.inputMonitoringBtn.title = inputAccess == kIOHIDAccessTypeUnknown
+        ? @"Request Access…" : @"Open Settings…";
 
     self.f18Check.state  = s_f18Enabled  ? NSControlStateValueOn : NSControlStateValueOff;
     self.swapCheck.state = s_swapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1161,23 +1179,42 @@ static SettingsWindowController *g_settings = nil;
     }];
 }
 
-- (void)openAccessibility:(id)sender {
+- (void)requestAccessibility:(id)sender {
     (void)sender;
-    NSString *pane = @"Privacy_Accessibility";
-    NSString *url = [@"x-apple.systempreferences:com.apple.preference.security?" stringByAppendingString:pane];
-    NSURL *settingsURL = [NSURL URLWithString:url];
-    if (settingsURL) [[NSWorkspace sharedWorkspace] openURL:settingsURL];
+    if (!AXIsProcessTrusted() && !s_accessibilityRequestAttempted) {
+        s_accessibilityRequestAttempted = true;
+        NSDictionary *options = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
+        (void)AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+        [self syncState];
+        return;
+    }
+    open_privacy_settings(@"Privacy_Accessibility");
 }
 
-- (void)openInputMonitoring:(id)sender {
+- (void)requestInputMonitoring:(id)sender {
     (void)sender;
-    NSString *pane = @"Privacy_ListenEvent";
-    NSString *url = [@"x-apple.systempreferences:com.apple.preference.security?" stringByAppendingString:pane];
-    NSURL *settingsURL = [NSURL URLWithString:url];
-    if (settingsURL) [[NSWorkspace sharedWorkspace] openURL:settingsURL];
+    if (input_monitoring_access() == kIOHIDAccessTypeUnknown) {
+        (void)IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
+        [self syncState];
+        return;
+    }
+    open_privacy_settings(@"Privacy_ListenEvent");
 }
 
 @end
+
+static void open_privacy_settings(NSString *pane) {
+    NSString *base;
+    if (@available(macOS 13.0, *))
+        base = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?";
+    else
+        base = @"x-apple.systempreferences:com.apple.preference.security?";
+    NSString *url = [base stringByAppendingString:pane];
+    NSURL *settingsURL = [NSURL URLWithString:url];
+    if (settingsURL && [[NSWorkspace sharedWorkspace] openURL:settingsURL]) return;
+    [[NSWorkspace sharedWorkspace] openURL:
+        [NSURL URLWithString:@"x-apple.systempreferences:"]];
+}
 
 /* ══════════════════════════════════════════════════════════════
    Menu bar UI
@@ -1197,10 +1234,9 @@ static AppDelegate *g_app = nil;
     g_app = self;
     g_settings = [SettingsWindowController new];
     [self buildMenu];
-    /* Request Input Monitoring permission (needed for IOHIDQueue per-device filtering) */
-    if (!CGPreflightListenEventAccess()) {
-        CGRequestListenEventAccess();
-        LOG("Input Monitoring: not granted — requesting. Per-device filter will activate once granted.");
+    /* Defer Input Monitoring's first request to the explicit settings button. */
+    if (!input_monitoring_granted()) {
+        LOG("Input Monitoring: not granted — waiting for user request.");
         s_imTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self
             selector:@selector(pollIM:) userInfo:nil repeats:YES];
     } else {
@@ -1213,8 +1249,8 @@ static AppDelegate *g_app = nil;
     s_naturalScroll = (scrollPref == nil) ? true : [scrollPref boolValue];
     [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self
         selector:@selector(systemDidWake:) name:NSWorkspaceDidWakeNotification object:nil];
-    setup_hid();
-    try_create_event_tap();
+    if (input_monitoring_granted()) setup_hid();
+    if (AXIsProcessTrusted()) try_create_event_tap();
 }
 
 - (void)systemDidWake:(NSNotification *)notification {
@@ -1283,7 +1319,7 @@ static AppDelegate *g_app = nil;
 
 - (void)refresh {
     BOOL accessible = AXIsProcessTrusted();
-    BOOL inputAllowed = CGPreflightListenEventAccess();
+    BOOL inputAllowed = input_monitoring_granted();
     BOOL connected  = tp_count() > 0;
 
     self.statusItem.button.title = (!accessible || !inputAllowed) ? @"TP!" :
@@ -1308,9 +1344,10 @@ static AppDelegate *g_app = nil;
 }
 
 - (void)pollIM:(NSTimer *)t {
-    if (CGPreflightListenEventAccess()) {
+    if (input_monitoring_granted()) {
         LOG("Input Monitoring: granted — building per-device queue");
         [t invalidate]; s_imTimer = nil;
+        if (!s_hidManager) setup_hid();
         try_build_queue_for_devices();
         BOOL needsRetry = NO;
         for (TPHIDDevice *ctx in s_tpDevices) needsRetry |= ctx->queue == NULL;

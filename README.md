@@ -41,8 +41,10 @@ URL field, text field, and OK/Cancel flow. Lenovo's proprietary artwork is not
 copied; the keyboard graphic is drawn from a macOS system symbol.
 
 The second tab contains the two required macOS permissions and all macOS-only
-options. Each permission has an explicit status and an **Open Settings…**
-button; macOS requires the user to approve access in System Settings.
+options. When access has not been requested, **Request Access…** invokes
+Apple's native permission API and registers TrackPointD. The macOS prompt can
+then open the matching System Settings pane; only the user can approve the
+final switch. After a denial or approval, the button becomes **Open Settings…**.
 
 | Setting | What it does | Origin |
 |---|---|---|
@@ -125,6 +127,20 @@ cd trackpoint-daemon-macos
 bash install.sh --check   # build and verify without installing
 bash install.sh
 ```
+
+The installer prefers an available Developer ID Application or Apple
+Development signing identity so macOS recognizes upgrades as the same app and
+keeps privacy approvals. Later upgrades reuse the installed app's signer when
+that identity is still available. If no stable identity is available it falls
+back to ad-hoc signing; macOS may then require both permissions again after an
+upgrade. Set `TRACKPOINTD_SIGN_IDENTITY=-` to force ad-hoc signing, or set it
+to a specific local code-signing identity.
+
+This script is for building on the Mac that will run the app. A prebuilt app
+for public GitHub Releases must additionally use a Developer ID Application
+certificate, hardened runtime, Apple notarization, and stapling in the release
+pipeline; a local Apple Development signature is not a public distribution
+signature.
 
 The installer builds a separate app, runs its protocol self-test, signs and
 verifies it, and only then replaces the installed copy. A failed upgrade rolls
