@@ -25,7 +25,7 @@ drivers or third-party dependencies.
   and the user's global remaps are no longer touched.
 - Removes all global mouse acceleration/defaults changes.
 - Fixes the recursive middle-click event loop, event-tap state recovery, HID
-  queue lifetime, and Press-to-Select timer leaks.
+  queue lifetime, and Press-to-Select timing, distance, and re-arm bugs.
 - Replaces the in-place installer with build, self-test, sign, verify, then a
   staged replacement with rollback.
 
@@ -55,7 +55,7 @@ final switch. After a denial or approval, the button becomes **Open Settings…*
 | Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
 | Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
 | Scroll Speed | USB, horizontal, and fallback multiplier; BLE vertical follows macOS | macOS adaptation |
-| Legacy Press-to-Select | Brief stick tap produces a left click; default off | Older UltraNav-inspired extra |
+| Emulated Press-to-Select | A brief, small stick movement followed by a stop produces a left click; default off | Older UltraNav-inspired extra |
 
 Saved text is stored in macOS user defaults as plain text. Do not put passwords
 or sensitive personal information in the F12 text action.
@@ -108,6 +108,13 @@ claim.
 Natural scrolling, modifier swaps, F18, adjustable scroll speed, and legacy
 Press-to-Select are useful macOS additions, not Lenovo Windows features.
 
+Keyboard II exposes X/Y movement but no pressure/Z axis or native
+Press-to-Select command. Consequently, this option is an explicit software
+approximation: a completely vertical press that generates no X/Y input cannot
+be detected. The gesture detector uses exact-device input, rejects long or
+large movement, waits for the stick to stop, and fails closed if device origin
+cannot be confirmed.
+
 ## Requirements
 
 - macOS 12 or newer
@@ -153,6 +160,12 @@ Grant both permissions:
 
 If an existing permission stops working after a new build, toggle TrackPointD
 off and on in that pane. The installer does not erase TCC permissions.
+
+Karabiner-Elements cannot modify this keyboard at the same time as TrackPointD:
+its **Modify events** mode takes exclusive ownership, so TrackPointD cannot
+confirm TrackPoint movement. In Karabiner-Elements → **Devices**, turn off
+**Modify events** for **TrackPoint Keyboard II**. TrackPointD supplies its own
+device-only modifier remaps; other keyboards can remain enabled in Karabiner.
 
 ## Uninstall
 
@@ -214,6 +227,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
 - [USB capture and descriptor from the Linux support report](https://gitlab.freedesktop.org/libinput/libinput/-/issues/547#note_1104344)
 - [Linux resume/reapply fix](https://github.com/torvalds/linux/commit/2f2bd7cbd1d1)
 - [tp2ctl protocol captures](https://github.com/telecastr/tp2ctl)
+- [Karabiner-Elements input-grabbing architecture](https://github.com/pqrs-org/Karabiner-Elements/blob/main/DEVELOPMENT.md)
 
 The Lenovo binaries are proprietary and are not copied or redistributed. Linux
 is GPL-2.0-or-later; this MIT project uses protocol facts and an independent

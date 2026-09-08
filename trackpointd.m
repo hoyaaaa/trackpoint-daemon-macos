@@ -49,10 +49,11 @@
 #define PREF_F12_TEXT     @"tpF12Text"
 #define PREF_F12_FILES    @"tpF12Files"
 
-/* Press-to-select thresholds */
-#define PTS_MAX_DURATION  0.25  /* max tap duration (seconds) */
-#define PTS_MAX_DIST      20.0  /* max accumulated displacement (pixels) */
-#define PTS_STOP_DELAY    0.06  /* idle time after last move = stick stopped */
+/* Keyboard II exposes X/Y but no pressure axis, so Press-to-Select is an
+ * emulated short-stick-tap gesture.  Keep timing monotonic and exact. */
+#define PTS_MAX_DURATION_NS  250000000ULL
+#define PTS_STOP_DELAY_NS     60000000ULL
+#define PTS_MAX_DIST                20.0
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
@@ -74,6 +75,7 @@ static bool    s_naturalScroll = false;
 static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
 static NSTimer      *s_imTimer = nil;       /* Input Monitoring permission poll timer */
+static NSTimer      *s_hidRetryTimer = nil;
 static IOHIDManagerRef s_hidManager = NULL;
 
 typedef NS_ENUM(NSInteger, TPF12Mode) {
@@ -94,13 +96,29 @@ static bool s_accessibilityRequestAttempted = false;
 #define TP_RECENCY_NS  50000000ULL   /* 50ms */
 #define NATIVE_DUP_NS  15000000ULL   /* native report vs. compatibility event */
 
+typedef enum {
+    TPPTSIdle,
+    TPPTSTracking,
+    TPPTSInhibited,
+} TPPTSPhase;
+
+typedef enum {
+    TPPTSNone,
+    TPPTSArmTimer,
+    TPPTSClick,
+} TPPTSAction;
+
+typedef struct {
+    TPPTSPhase phase;
+    uint64_t startTimeNs;
+    uint64_t lastMoveTimeNs;
+    double totalDistance;
+    CGPoint position;
+} TPPTSState;
+
 /* Press-to-select state */
-static bool              s_ptsEnabled    = false;
-static bool              s_pts_tracking  = false;  /* active tap session */
-static bool              s_pts_inhibit   = false;  /* gesture too large — wait for stick stop */
-static double            s_pts_totalDist = 0;
-static CFAbsoluteTime    s_pts_startTime = 0;
-static CGPoint           s_pts_pos       = {0, 0};
+static bool              s_ptsEnabled = false;
+static TPPTSState        s_ptsState   = {0};
 static CFRunLoopTimerRef s_pts_timer     = NULL;
 
 @interface TPHIDDevice : NSObject {
@@ -120,6 +138,8 @@ static CFRunLoopTimerRef s_pts_timer     = NULL;
     bool opened;
     bool scheduled;
     bool removed;
+    bool openAttempted;
+    IOReturn lastOpenResult;
 }
 - (instancetype)initWithDevice:(IOHIDDeviceRef)hidDevice;
 - (void)buildQueue;
@@ -131,6 +151,12 @@ static NSMutableArray<TPHIDDevice *> *s_tpDevices;
 
 static int tp_count(void) {
     return (int)s_tpDevices.count;
+}
+
+static bool tp_has_input_queue(void) {
+    for (TPHIDDevice *ctx in s_tpDevices)
+        if (ctx->queue) return true;
+    return false;
 }
 
 static IOHIDAccessType input_monitoring_access(void) {
@@ -153,6 +179,7 @@ static void setup_hid(void);
 static void apply_key_remap(void);
 static void apply_hardware_settings(void);
 static void cancel_pts(void);
+static void cancel_pts_gesture(void);
 static void reset_gesture_state(void);
 static void reset_compatibility_middle(void);
 static NSURL *validated_http_url(NSString *value);
@@ -162,6 +189,7 @@ static void show_notification_center(void);
 static void open_privacy_settings(NSString *pane);
 static void handle_hotkey(uint16_t usage);
 static void post_middle_click(CGPoint point);
+static uint64_t mach_time_to_ns(uint64_t ticks);
 static uint64_t elapsed_ns(uint64_t now, uint64_t then);
 static void native_middle_changed(TPHIDDevice *ctx, bool down);
 
@@ -343,9 +371,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     if (down && !ctx->nativeMiddleDown) {
         /* A CG compatibility event can arrive before this raw report. */
         reset_compatibility_middle();
-        cancel_pts();
-        s_pts_tracking = false;
-        s_pts_inhibit = false;
+        cancel_pts_gesture();
         ctx->nativeMiddleDown = true;
         ctx->nativeScrolled = false;
         ctx->lastNativeMiddleTime = mach_absolute_time();
@@ -380,6 +406,8 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     opened = false;
     scheduled = false;
     removed = false;
+    openAttempted = false;
+    lastOpenResult = kIOReturnSuccess;
     memset(reportBuffer, 0, sizeof(reportBuffer));
     return self;
 }
@@ -388,10 +416,18 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     if (queue) return;
     if (!opened) {
         IOReturn openRet = IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone);
-        LOG("IOHIDDeviceOpen: 0x%08X (%s)", (unsigned int)openRet,
-            openRet == kIOReturnSuccess ? "ok" :
-            openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
-        if (openRet != kIOReturnSuccess) return;
+        if (!openAttempted || openRet != lastOpenResult)
+            LOG("IOHIDDeviceOpen: 0x%08X (%s)", (unsigned int)openRet,
+                openRet == kIOReturnSuccess ? "ok" :
+                openRet == kIOReturnExclusiveAccess ? "exclusive" : "other");
+        openAttempted = true;
+        lastOpenResult = openRet;
+        if (openRet != kIOReturnSuccess) {
+            if (openRet == kIOReturnExclusiveAccess)
+                LOG("direct input blocked by another input app; in Karabiner, "
+                    "turn off Modify events for TrackPoint Keyboard II");
+            return;
+        }
         opened = true;
     }
     if (!scheduled) {
@@ -741,7 +777,7 @@ static SettingsWindowController *g_settings = nil;
     self.scrollValueLabel.frame = NSMakeRect(382, 54, 54, 18);
     [extrasBox addSubview:self.scrollValueLabel];
 
-    self.ptsCheck = [NSButton checkboxWithTitle:@"Legacy Press-to-Select (tap stick → left click)"
+    self.ptsCheck = [NSButton checkboxWithTitle:@"Press-to-Select (emulated stick tap → left click)"
                      target:self action:@selector(togglePts:)];
     self.ptsCheck.frame = NSMakeRect(14, 22, 422, 20);
     [extrasBox addSubview:self.ptsCheck];
@@ -753,13 +789,21 @@ static SettingsWindowController *g_settings = nil;
 - (void)syncState {
     BOOL accessible = AXIsProcessTrusted();
     BOOL connected  = tp_count() > 0;
+    BOOL directInput = tp_has_input_queue();
     if (accessible) s_accessibilityRequestAttempted = true;
 
-    self.keyboardStatus.stringValue = connected
-        ? [NSString stringWithFormat:@"Keyboard: Connected (%@ sensitivity)",
-            s_hardwareSensitivity ? @"hardware" : @"software fallback"]
-        : @"Keyboard: Disconnected";
-    self.keyboardStatus.textColor   = connected  ? [NSColor systemGreenColor]   : [NSColor secondaryLabelColor];
+    if (!connected) {
+        self.keyboardStatus.stringValue = @"Keyboard: Disconnected";
+        self.keyboardStatus.textColor = [NSColor secondaryLabelColor];
+    } else if (!directInput) {
+        self.keyboardStatus.stringValue = @"Keyboard: Connected — direct input is blocked";
+        self.keyboardStatus.textColor = [NSColor systemOrangeColor];
+    } else {
+        self.keyboardStatus.stringValue = [NSString stringWithFormat:
+            @"Keyboard: Connected (%@ sensitivity)",
+            s_hardwareSensitivity ? @"hardware" : @"software fallback"];
+        self.keyboardStatus.textColor = [NSColor systemGreenColor];
+    }
 
     IOHIDAccessType inputAccess = input_monitoring_access();
     BOOL inputAllowed = inputAccess == kIOHIDAccessTypeGranted;
@@ -782,6 +826,9 @@ static SettingsWindowController *g_settings = nil;
     self.fnLockCheck.state = s_fnLock ? NSControlStateValueOn : NSControlStateValueOff;
     self.preferredCheck.state = s_preferredScroll ? NSControlStateValueOn : NSControlStateValueOff;
     self.ptsCheck.state  = s_ptsEnabled  ? NSControlStateValueOn : NSControlStateValueOff;
+    self.ptsCheck.toolTip = connected && !directInput
+        ? @"Another input app owns this keyboard. In Karabiner-Elements → Devices, turn off Modify events for TrackPoint Keyboard II."
+        : @"Keyboard II has no pressure signal. A short, small stick movement followed by a stop is treated as a left click.";
 
     self.slider.integerValue = s_sensitivity;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", s_sensitivity];
@@ -843,10 +890,7 @@ static SettingsWindowController *g_settings = nil;
 - (void)togglePts:(NSButton *)btn {
     s_ptsEnabled = (btn.state == NSControlStateValueOn);
     [[NSUserDefaults standardUserDefaults] setBool:s_ptsEnabled forKey:PREF_PTS];
-    if (!s_ptsEnabled) {
-        cancel_pts();
-        s_pts_tracking = false; s_pts_inhibit = false;
-    }
+    if (!s_ptsEnabled) cancel_pts_gesture();
     LOG("press-to-select: %s", s_ptsEnabled ? "ON" : "OFF");
 }
 
@@ -1269,6 +1313,8 @@ static AppDelegate *g_app = nil;
     (void)notification;
     [self.accessTimer invalidate];
     [s_imTimer invalidate];
+    [s_hidRetryTimer invalidate];
+    s_hidRetryTimer = nil;
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
     cancel_pts();
     reset_gesture_state();
@@ -1321,8 +1367,9 @@ static AppDelegate *g_app = nil;
     BOOL accessible = AXIsProcessTrusted();
     BOOL inputAllowed = input_monitoring_granted();
     BOOL connected  = tp_count() > 0;
+    BOOL directInput = !connected || tp_has_input_queue();
 
-    self.statusItem.button.title = (!accessible || !inputAllowed) ? @"TP!" :
+    self.statusItem.button.title = (!accessible || !inputAllowed || !directInput) ? @"TP!" :
                                     connected   ? @"TP+" : @"TP-";
     [g_settings syncState];
 
@@ -1622,11 +1669,24 @@ static void cancel_pts(void) {
     s_pts_timer = NULL;
 }
 
-static void reset_gesture_state(void) {
+static void pts_cancel_state(TPPTSState *state) {
+    *state = (TPPTSState){0};
+}
+
+static void pts_inhibit(TPPTSState *state, uint64_t nowNs) {
+    if (state->phase == TPPTSIdle) return;
+    state->phase = TPPTSInhibited;
+    state->lastMoveTimeNs = nowNs;
+}
+
+static void cancel_pts_gesture(void) {
     cancel_pts();
+    pts_cancel_state(&s_ptsState);
+}
+
+static void reset_gesture_state(void) {
+    cancel_pts_gesture();
     reset_compatibility_middle();
-    s_pts_tracking = false;
-    s_pts_inhibit = false;
     for (TPHIDDevice *ctx in s_tpDevices) {
         ctx->nativeMiddleDown = false;
         ctx->nativeScrolled = false;
@@ -1641,41 +1701,85 @@ static void reset_compatibility_middle(void) {
     s_scrollAccumY = 0.0;
 }
 
+static uint64_t monotonic_time_ns(void) {
+    return mach_time_to_ns(mach_absolute_time());
+}
+
+static TPPTSAction pts_on_move(TPPTSState *state, uint64_t nowNs,
+                               double distance, CGPoint position,
+                               bool mayStart) {
+    if (state->phase == TPPTSIdle) {
+        if (!mayStart) return TPPTSNone;
+        state->phase = TPPTSTracking;
+        state->startTimeNs = nowNs;
+        state->totalDistance = 0.0;
+    }
+
+    state->lastMoveTimeNs = nowNs;
+    state->totalDistance += distance;
+    state->position = position;
+
+    if (state->phase == TPPTSTracking &&
+        (state->totalDistance >= PTS_MAX_DIST ||
+         nowNs - state->startTimeNs >= PTS_MAX_DURATION_NS))
+        state->phase = TPPTSInhibited;
+
+    return TPPTSArmTimer;
+}
+
+static TPPTSAction pts_on_idle(TPPTSState *state, uint64_t nowNs,
+                               uint64_t *remainingNs) {
+    if (state->phase == TPPTSIdle) return TPPTSNone;
+    uint64_t idleNs = nowNs >= state->lastMoveTimeNs
+        ? nowNs - state->lastMoveTimeNs : 0;
+    if (idleNs < PTS_STOP_DELAY_NS) {
+        if (remainingNs) *remainingNs = PTS_STOP_DELAY_NS - idleNs;
+        return TPPTSArmTimer;
+    }
+    bool shouldClick = state->phase == TPPTSTracking;
+    pts_cancel_state(state);
+    return shouldClick ? TPPTSClick : TPPTSNone;
+}
+
 /* ══════════════════════════════════════════════════════════════
-   Press-to-select: fires left click after brief stick tap
+   Press-to-select: emulate a left click after a brief stick tap
    ══════════════════════════════════════════════════════════════ */
+static void schedule_pts_timer(uint64_t delayNs);
+
 static void pts_fire(CFRunLoopTimerRef timer, void *info) {
     (void)info;
     if (timer != s_pts_timer) return;
     cancel_pts();
-    if (s_pts_inhibit) {
-        /* gesture was too large — stick stopped, clear inhibit, no click */
-        s_pts_inhibit = false;
+    CGPoint position = s_ptsState.position;
+    uint64_t remainingNs = 0;
+    TPPTSAction action = pts_on_idle(&s_ptsState, monotonic_time_ns(),
+                                     &remainingNs);
+    if (action == TPPTSArmTimer) {
+        schedule_pts_timer(remainingNs);
         return;
     }
-    if (!s_pts_tracking || !s_ptsEnabled || tp_count() == 0 ||
-        !AXIsProcessTrusted() ||
-        CFAbsoluteTimeGetCurrent() - s_pts_startTime > PTS_MAX_DURATION) {
-        s_pts_tracking = false;
-        return;
-    }
-    s_pts_tracking = false;
-    CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, s_pts_pos, kCGMouseButtonLeft);
-    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp,   s_pts_pos, kCGMouseButtonLeft);
+    if (action != TPPTSClick || !s_ptsEnabled || tp_count() == 0 ||
+        !AXIsProcessTrusted()) return;
+
+    CGEventRef dn = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown,
+                                             position, kCGMouseButtonLeft);
+    CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp,
+                                             position, kCGMouseButtonLeft);
     if (dn && up) {
         CGEventPost(kCGSessionEventTap, dn);
         CGEventPost(kCGSessionEventTap, up);
     }
     if (dn) CFRelease(dn);
     if (up) CFRelease(up);
-    LOG("press-to-select: click at (%.0f, %.0f)", s_pts_pos.x, s_pts_pos.y);
+    LOG("press-to-select: click at (%.0f, %.0f)", position.x, position.y);
 }
 
-static void schedule_pts_timer(void) {
+static void schedule_pts_timer(uint64_t delayNs) {
     cancel_pts();
     CFRunLoopTimerContext ctx = {0, NULL, NULL, NULL, NULL};
     s_pts_timer = CFRunLoopTimerCreate(kCFAllocatorDefault,
-        CFAbsoluteTimeGetCurrent() + PTS_STOP_DELAY, 0, 0, 0, pts_fire, &ctx);
+        CFAbsoluteTimeGetCurrent() + (double)delayNs / NSEC_PER_SEC,
+        0, 0, 0, pts_fire, &ctx);
     if (s_pts_timer)
         CFRunLoopAddTimer(CFRunLoopGetMain(), s_pts_timer, kCFRunLoopCommonModes);
 }
@@ -1696,20 +1800,35 @@ static uint64_t elapsed_ns(uint64_t now, uint64_t then) {
     return (now - then) * timebase.numer / timebase.denom;
 }
 
-static TPOrigin poll_trackpoint_origin(void) {
+static uint64_t mach_time_to_ns(uint64_t ticks) {
+    static mach_timebase_info_data_t timebase;
+    if (timebase.denom == 0) mach_timebase_info(&timebase);
+    return ticks * timebase.numer / timebase.denom;
+}
+
+static TPOrigin poll_trackpoint_origin(CGEventTimestamp eventTimeNs) {
     TPOrigin origin = {false, false, false, false, false, false};
     uint64_t now = mach_absolute_time();
     for (TPHIDDevice *ctx in s_tpDevices) {
         if (ctx->queue) {
             IOHIDValueRef value;
             while ((value = IOHIDQueueCopyNextValueWithTimeout(ctx->queue, 0)) != NULL) {
-                uint64_t age = elapsed_ns(now, IOHIDValueGetTimeStamp(value));
-                if (age < 15000000ULL) {
-                    origin.fresh = true;
-                    ctx->lastPointerTime = now;
+                uint64_t valueTime = IOHIDValueGetTimeStamp(value);
+                uint64_t valueTimeNs = mach_time_to_ns(valueTime);
+                bool freshForEvent = eventTimeNs != 0
+                    ? valueTimeNs <= eventTimeNs &&
+                      eventTimeNs - valueTimeNs < NATIVE_DUP_NS
+                    : elapsed_ns(now, valueTime) < NATIVE_DUP_NS;
+                if (freshForEvent) {
                     IOHIDElementRef element = IOHIDValueGetElement(value);
-                    if (IOHIDElementGetUsagePage(element) == kHIDPage_Button &&
-                        IOHIDElementGetUsage(element) == 3) {
+                    uint32_t page = IOHIDElementGetUsagePage(element);
+                    uint32_t usage = IOHIDElementGetUsage(element);
+                    if (page == kHIDPage_GenericDesktop &&
+                        (usage == kHIDUsage_GD_X || usage == kHIDUsage_GD_Y) &&
+                        IOHIDValueGetIntegerValue(value) != 0) {
+                        origin.fresh = true;
+                        ctx->lastPointerTime = now;
+                    } else if (page == kHIDPage_Button && usage == 3) {
                         ctx->lastMiddleButtonTime = now;
                         ctx->rawMiddleDown = IOHIDValueGetIntegerValue(value) != 0;
                     }
@@ -1783,30 +1902,25 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                   type == kCGEventRightMouseDragged ||
                   type == kCGEventOtherMouseDragged;
     bool isOtherButton = type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp;
-    TPOrigin origin = (isMove || isOtherButton) ? poll_trackpoint_origin()
+    TPOrigin origin = (isMove || isOtherButton)
+        ? poll_trackpoint_origin(CGEventGetTimestamp(event))
                                                 : (TPOrigin){0};
 
     if (type == kCGEventScrollWheel) {
         /* BLE emits a standard vertical wheel event in addition to its raw
          * report. Pass it through unchanged; the exact-device raw callback
          * records whether the TrackPoint gesture scrolled. */
-        cancel_pts();
-        s_pts_tracking = false;
-        s_pts_inhibit = false;
+        cancel_pts_gesture();
         return event;
     }
 
     if (type == kCGEventLeftMouseDown || type == kCGEventRightMouseDown ||
         type == kCGEventOtherMouseDown) {
-        cancel_pts();
-        s_pts_tracking = false;
-        s_pts_inhibit = false;
+        cancel_pts_gesture();
     }
 
     if (isDrag) {
-        cancel_pts();
-        s_pts_tracking = false;
-        s_pts_inhibit = false;
+        cancel_pts_gesture();
     }
 
     if (isOtherButton) {
@@ -1825,9 +1939,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                 s_lastPos = CGEventGetLocation(event);
                 s_scrollAccumX = 0.0;
                 s_scrollAccumY = 0.0;
-                cancel_pts();
-                s_pts_tracking = false;
-                s_pts_inhibit = false;
+                cancel_pts_gesture();
                 return NULL;
             }
 
@@ -1876,7 +1988,11 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
     if (origin.nativeMiddleActive && origin.fromTrackPoint) return NULL;
 
     if (!origin.fromTrackPoint) {
-        if (s_pts_tracking || s_pts_inhibit) reset_gesture_state();
+        if (s_ptsState.phase != TPPTSIdle) {
+            cancel_pts();
+            pts_inhibit(&s_ptsState, monotonic_time_ns());
+            schedule_pts_timer(PTS_STOP_DELAY_NS);
+        }
         return event;
     }
 
@@ -1898,27 +2014,10 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 
     if (s_ptsEnabled && type == kCGEventMouseMoved) {
         double distance = hypot(dx, dy);
-        bool needTimer = false;
         cancel_pts();
-        if (s_pts_inhibit) {
-            needTimer = true;
-        } else if (!s_pts_tracking && origin.fresh) {
-            s_pts_tracking = true;
-            s_pts_startTime = CFAbsoluteTimeGetCurrent();
-            s_pts_totalDist = distance;
-            s_pts_pos = newPosition;
-            needTimer = true;
-        } else if (s_pts_tracking) {
-            s_pts_totalDist += distance;
-            s_pts_pos = newPosition;
-            if (CFAbsoluteTimeGetCurrent() - s_pts_startTime >= PTS_MAX_DURATION ||
-                s_pts_totalDist >= PTS_MAX_DIST) {
-                s_pts_tracking = false;
-                s_pts_inhibit = true;
-            }
-            needTimer = true;
-        }
-        if (needTimer) schedule_pts_timer();
+        TPPTSAction action = pts_on_move(&s_ptsState, monotonic_time_ns(),
+                                         distance, newPosition, origin.fresh);
+        if (action == TPPTSArmTimer) schedule_pts_timer(PTS_STOP_DELAY_NS);
     }
 
     return event;
@@ -1972,9 +2071,36 @@ static void try_create_event_tap(void) {
 
 /* Attempt to open stored ThinkPad devices and build queue.
  * Called at startup and whenever Input Monitoring permission is detected. */
+static void update_hid_retry_timer(void);
+
 static void try_build_queue_for_devices(void) {
     for (TPHIDDevice *ctx in [s_tpDevices copy]) [ctx buildQueue];
     apply_hardware_settings();
+    update_hid_retry_timer();
+}
+
+static void update_hid_retry_timer(void) {
+    bool needsRetry = false;
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        if (!ctx->queue) {
+            needsRetry = true;
+            break;
+        }
+    }
+
+    if (!needsRetry) {
+        [s_hidRetryTimer invalidate];
+        s_hidRetryTimer = nil;
+        return;
+    }
+    if (s_hidRetryTimer) return;
+
+    s_hidRetryTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES
+        block:^(NSTimer *timer) {
+            (void)timer;
+            try_build_queue_for_devices();
+            [g_app refresh];
+        }];
 }
 
 static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
@@ -1987,16 +2113,7 @@ static void hid_added(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     [s_tpDevices addObject:deviceContext];
     [deviceContext buildQueue];
     apply_hardware_settings();
-    if (!deviceContext->queue) {
-        __weak TPHIDDevice *weakContext = deviceContext;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2000 * NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
-            TPHIDDevice *strongContext = weakContext;
-            if (!strongContext || ![s_tpDevices containsObject:strongContext]) return;
-            [strongContext buildQueue];
-            apply_hardware_settings();
-        });
-    }
+    update_hid_retry_timer();
     LOG("TrackPoint Keyboard II connected pid=%04X",
         (unsigned int)device_number(dev, CFSTR(kIOHIDProductIDKey)));
     set_tap_enabled(true);
@@ -2012,6 +2129,7 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
     if (index == NSNotFound) return;
     [s_tpDevices[index] detachForRemoval];
     [s_tpDevices removeObjectAtIndex:index];
+    update_hid_retry_timer();
     reset_gesture_state();
     s_hardwareSensitivity = false;
     if (tp_count() > 0) apply_hardware_settings();
@@ -2087,6 +2205,50 @@ static int run_self_test(void) {
     assert(decode_middle_report(0x15, notMiddle, 9, &middleDown) && !middleDown);
     uint8_t middleWithoutID[] = {0, 0x04, 0, 0, 0, 0, 0, 0};
     assert(!decode_middle_report(0x15, middleWithoutID, 8, &middleDown));
+
+    TPPTSState pts = {0};
+    uint64_t remainingNs = 0;
+    CGPoint point = CGPointMake(100, 200);
+    assert(pts_on_move(&pts, 1000000000ULL, 2.0, point, true) == TPPTSArmTimer);
+    assert(pts_on_move(&pts, 1020000000ULL, 3.0, point, false) == TPPTSArmTimer);
+    assert(pts_on_idle(&pts, 1079999999ULL, &remainingNs) == TPPTSArmTimer);
+    assert(remainingNs == 1);
+    assert(pts_on_idle(&pts, 1080000000ULL, &remainingNs) == TPPTSClick);
+    assert(pts_on_idle(&pts, 1080000001ULL, &remainingNs) == TPPTSNone);
+
+    assert(pts_on_move(&pts, 2000000000ULL, PTS_MAX_DIST, point, true) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSInhibited);
+    assert(pts_on_idle(&pts, 2060000000ULL, NULL) == TPPTSNone);
+    assert(pts.phase == TPPTSIdle);
+
+    assert(pts_on_move(&pts, 3000000000ULL, 10.0, point, true) == TPPTSArmTimer);
+    assert(pts_on_move(&pts, 3010000000ULL, 10.0, point, false) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSInhibited);
+    assert(pts_on_idle(&pts, 3070000000ULL, NULL) == TPPTSNone);
+
+    assert(pts_on_move(&pts, 4000000000ULL, 1.0, point, true) == TPPTSArmTimer);
+    assert(pts_on_move(&pts, 4249999999ULL, 1.0, point, false) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSTracking);
+    assert(pts_on_idle(&pts, 4310000000ULL, NULL) == TPPTSClick);
+
+    assert(pts_on_move(&pts, 5000000000ULL, 1.0, point, true) == TPPTSArmTimer);
+    assert(pts_on_move(&pts, 5250000000ULL, 1.0, point, false) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSInhibited);
+    assert(pts_on_idle(&pts, 5310000000ULL, NULL) == TPPTSNone);
+
+    assert(pts_on_move(&pts, 6000000000ULL, 1.0, point, false) == TPPTSNone);
+    assert(pts.phase == TPPTSIdle);
+    assert(pts_on_move(&pts, 6100000000ULL, 1.0, point, true) == TPPTSArmTimer);
+    pts_cancel_state(&pts);
+    assert(pts_on_idle(&pts, 6200000000ULL, NULL) == TPPTSNone);
+
+    assert(pts_on_move(&pts, 7000000000ULL, 10.0, point, true) == TPPTSArmTimer);
+    assert(pts_on_move(&pts, 7010000000ULL, 15.0, point, false) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSInhibited);
+    pts_inhibit(&pts, 7070000000ULL); /* origin gap must not re-arm a long move */
+    assert(pts_on_move(&pts, 7080000000ULL, 2.0, point, true) == TPPTSArmTimer);
+    assert(pts.phase == TPPTSInhibited);
+    assert(pts_on_idle(&pts, 7140000000ULL, NULL) == TPPTSNone);
 
     puts("trackpointd self-test: ok");
     return 0;
