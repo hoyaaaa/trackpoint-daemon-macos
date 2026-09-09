@@ -39,8 +39,8 @@ Use **Try 1** and **Try 9** beside Pointer speed for an obvious slow/fast
 comparison. The status below the slider says whether the level was applied to
 the keyboard or saved for its next connection. **TrackPointD Enabled** in the
 menu pauses remaps, shortcuts, and scrolling enhancements while leaving basic
-pointer input available. On Bluetooth, Scroll speed is labeled accurately as
-horizontal-only because macOS owns the standard vertical wheel event.
+pointer input available. Scroll speed affects both axes on USB and Bluetooth;
+the default position preserves macOS's existing Bluetooth vertical speed.
 
 The first tab follows Lenovo's Windows `Keyboard Properties → External
 TrackPoint Keyboard` page: keyboard graphic, nine-position `Slow`–`Fast`
@@ -63,7 +63,7 @@ final switch. After a denial or approval, the button becomes **Open Settings…*
 | Fn Lock | Standard F1–F12 vs. icon actions | Keyboard firmware |
 | Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
 | Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
-| Scroll Speed | USB, horizontal, and fallback multiplier; BLE vertical follows macOS | macOS adaptation |
+| Scroll Speed | Vertical and horizontal TrackPoint scrolling on USB and Bluetooth | macOS adaptation |
 
 Saved text is stored in macOS user defaults as plain text. Do not put passwords
 or sensitive personal information in the F12 text action.
@@ -207,8 +207,9 @@ Commands: `0x02` hardware speed, `0x05` Fn Lock, `0x09` Preferred Scrolling.
 The undocumented Windows initialization command is deliberately not sent.
 
 The native wheel input report ID is `0x16` (22 decimal) on both USB and BLE.
-BLE additionally sends standard vertical-wheel input, so only its vendor
-horizontal value is synthesized to avoid double vertical scrolling.
+BLE additionally sends standard vertical-wheel input. TrackPointD scales that
+existing event and synthesizes only the vendor horizontal value, avoiding
+double vertical scrolling.
 Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
 middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
 before a report is used.

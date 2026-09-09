@@ -98,6 +98,7 @@ static bool s_accessibilityRequestAttempted = false;
     uint64_t lastPointerTime;
     uint64_t lastMiddleButtonTime;
     uint64_t lastNativeScrollTime;
+    bool bleVerticalPending;
     uint64_t lastNativeMiddleTime;
     uint16_t lastHotkey;
     bool nativeMiddleDown;
@@ -194,13 +195,6 @@ static int device_number(IOHIDDeviceRef dev, CFStringRef key) {
     if (value && CFGetTypeID(value) == CFNumberGetTypeID())
         CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &number);
     return number;
-}
-
-static bool tp_has_ble(void) {
-    for (TPHIDDevice *ctx in s_tpDevices)
-        if (device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID)
-            return true;
-    return false;
 }
 
 static bool is_trackpoint_keyboard_ii(IOHIDDeviceRef dev) {
@@ -314,6 +308,7 @@ static void hid_report(void *context, IOReturn result, void *sender,
             }
         }
         ctx->lastNativeScrollTime = mach_absolute_time();
+        ctx->bleVerticalPending = isBLE && vertical != 0;
         ctx->nativeScrolled = true;
         s_hasMoved = true;
         return;
@@ -393,6 +388,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     lastPointerTime = 0;
     lastMiddleButtonTime = 0;
     lastNativeScrollTime = 0;
+    bleVerticalPending = false;
     lastNativeMiddleTime = 0;
     lastHotkey = 0;
     nativeMiddleDown = false;
@@ -406,6 +402,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     lastPointerTime = 0;
     lastMiddleButtonTime = 0;
     lastNativeScrollTime = 0;
+    bleVerticalPending = false;
     lastNativeMiddleTime = 0;
     lastHotkey = 0;
 }
@@ -765,11 +762,8 @@ static SettingsWindowController *g_settings = nil;
 
     self.scrollSlider.doubleValue = s_scrollSpeed;
     self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", s_scrollSpeed];
-    self.scrollLabel.stringValue = connected && tp_has_ble()
-        ? @"Horizontal speed (BLE)" : @"Scroll speed";
-    self.scrollLabel.toolTip = connected && tp_has_ble()
-        ? @"Bluetooth vertical scrolling is handled directly by macOS; this controls horizontal scrolling."
-        : @"Controls USB, horizontal, and compatibility scrolling.";
+    self.scrollLabel.stringValue = @"Scroll speed";
+    self.scrollLabel.toolTip = @"Controls vertical and horizontal TrackPoint scrolling.";
 
     [self updateF12Summary];
 }
@@ -1715,6 +1709,24 @@ static uint64_t elapsed_ns(uint64_t now, uint64_t then) {
     return (now - then) * timebase.numer / timebase.denom;
 }
 
+static int64_t scaled_scroll_delta(int64_t value, double factor) {
+    if (value == 0) return 0;
+    int64_t scaled = (int64_t)llround((double)value * factor);
+    return scaled == 0 ? (value < 0 ? -1 : 1) : scaled;
+}
+
+static bool consume_ble_vertical_scroll(void) {
+    uint64_t now = mach_absolute_time();
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        if (!ctx->bleVerticalPending) continue;
+        ctx->bleVerticalPending = false;
+        if (device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID &&
+            elapsed_ns(now, ctx->lastNativeScrollTime) < NATIVE_DUP_NS)
+            return true;
+    }
+    return false;
+}
+
 static TPOrigin poll_trackpoint_origin(void) {
     TPOrigin origin = {0};
     uint64_t now = mach_absolute_time();
@@ -1777,6 +1789,22 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
     }
 
     if (!s_enabled) return event;
+
+    if (type == kCGEventScrollWheel) {
+        if (!s_preferredScroll || !consume_ble_vertical_scroll()) return event;
+        double factor = s_scrollSpeed / SCROLL_SPEED;
+        const CGEventField fields[] = {
+            kCGScrollWheelEventDeltaAxis1,
+            kCGScrollWheelEventFixedPtDeltaAxis1,
+            kCGScrollWheelEventPointDeltaAxis1,
+        };
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+            int64_t value = CGEventGetIntegerValueField(event, fields[i]);
+            CGEventSetIntegerValueField(event, fields[i],
+                                        scaled_scroll_delta(value, factor));
+        }
+        return event;
+    }
 
     bool isMove = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
                   type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
@@ -1883,6 +1911,7 @@ static void try_create_event_tap(void) {
     CGEventMask mask =
         CGEventMaskBit(kCGEventOtherMouseDown)    |
         CGEventMaskBit(kCGEventOtherMouseUp)      |
+        CGEventMaskBit(kCGEventScrollWheel)       |
         CGEventMaskBit(kCGEventMouseMoved)        |
         CGEventMaskBit(kCGEventLeftMouseDragged)  |
         CGEventMaskBit(kCGEventRightMouseDragged) |
@@ -2023,6 +2052,11 @@ static int run_self_test(void) {
     assert(decode_middle_report(0x15, notMiddle, 9, &middleDown) && !middleDown);
     uint8_t middleWithoutID[] = {0, 0x04, 0, 0, 0, 0, 0, 0};
     assert(!decode_middle_report(0x15, middleWithoutID, 8, &middleDown));
+
+    assert(scaled_scroll_delta(7, 1.0) == 7);
+    assert(scaled_scroll_delta(-7, 2.0) == -14);
+    assert(scaled_scroll_delta(1, 0.1) == 1);
+    assert(scaled_scroll_delta(-1, 0.1) == -1);
 
     puts("trackpointd self-test: ok");
     return 0;
