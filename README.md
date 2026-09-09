@@ -35,6 +35,13 @@ Click the white keyboard icon in the menu bar, then **Settings…**. Its center
 dot is red when connected, orange when attention is required, and dark gray
 when the keyboard is disconnected.
 
+Use **Try 1** and **Try 9** beside Pointer speed for an obvious slow/fast
+comparison. The status below the slider says whether the level was applied to
+the keyboard or saved for its next connection. **TrackPointD Enabled** in the
+menu pauses remaps, shortcuts, and scrolling enhancements while leaving basic
+pointer input available. On Bluetooth, Scroll speed is labeled accurately as
+horizontal-only because macOS owns the standard vertical wheel event.
+
 The first tab follows Lenovo's Windows `Keyboard Properties → External
 TrackPoint Keyboard` page: keyboard graphic, nine-position `Slow`–`Fast`
 slider, Preferred Scrolling, and an F12 action summary with **Modify…**. The

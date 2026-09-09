@@ -48,6 +48,7 @@
 #define PREF_F12_URL      @"tpF12URL"
 #define PREF_F12_TEXT     @"tpF12Text"
 #define PREF_F12_FILES    @"tpF12Files"
+#define PREF_ENABLED      @"tpEnabled"
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
@@ -60,6 +61,7 @@ static uint64_t          s_lastMiddleClickTime = 0;
 
 static bool    s_f18Enabled  = true;
 static bool    s_swapEnabled = true;
+static bool    s_enabled     = true;
 static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
 static double  s_scrollSpeed = SCROLL_SPEED;
 static bool    s_preferredScroll = true;
@@ -194,6 +196,13 @@ static int device_number(IOHIDDeviceRef dev, CFStringRef key) {
     return number;
 }
 
+static bool tp_has_ble(void) {
+    for (TPHIDDevice *ctx in s_tpDevices)
+        if (device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID)
+            return true;
+    return false;
+}
+
 static bool is_trackpoint_keyboard_ii(IOHIDDeviceRef dev) {
     int vid = device_number(dev, CFSTR(kIOHIDVendorIDKey));
     int pid = device_number(dev, CFSTR(kIOHIDProductIDKey));
@@ -266,6 +275,7 @@ static void hid_report(void *context, IOReturn result, void *sender,
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput) return;
     TPHIDDevice *ctx = tp_context_for_device((IOHIDDeviceRef)sender);
     if (!ctx) return;
+    if (!s_enabled) return;
 
     /* Report 5 carries a Lenovo hotkey usage (second byte is padding on BLE). */
     if (reportID == 0x05) {
@@ -340,6 +350,8 @@ static void hid_value(void *context, IOReturn result, void *sender,
         }
         return;
     }
+
+    if (!s_enabled) return;
 
     if (page == kHIDPage_Button && usage == 3) {
         ctx->lastMiddleButtonTime = mach_absolute_time();
@@ -418,7 +430,11 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
 @property (strong) NSButton    *preferredCheck;
 @property (strong) NSSlider    *slider;
 @property (strong) NSTextField *valueLabel;
+@property (strong) NSTextField *applyStatus;
+@property (strong) NSButton    *slowTestButton;
+@property (strong) NSButton    *fastTestButton;
 @property (strong) NSSlider    *scrollSlider;
+@property (strong) NSTextField *scrollLabel;
 @property (strong) NSTextField *scrollValueLabel;
 @property (strong) NSButton    *accessibilityBtn;
 @property (strong) NSButton    *inputMonitoringBtn;
@@ -486,22 +502,22 @@ static SettingsWindowController *g_settings = nil;
     trackPointDot.accessibilityLabel = @"TrackPoint";
     [windowsView addSubview:trackPointDot];
 
-    NSBox *pointerBox = [[NSBox alloc] initWithFrame:NSMakeRect(20, 264, 448, 76)];
+    NSBox *pointerBox = [[NSBox alloc] initWithFrame:NSMakeRect(20, 244, 448, 96)];
     pointerBox.title = @"Pointer speed";
     [windowsView addSubview:pointerBox];
 
     NSTextField *minLbl = [NSTextField labelWithString:@"Slow"];
     minLbl.font = [NSFont systemFontOfSize:11];
-    minLbl.frame = NSMakeRect(12, 19, 38, 16);
+    minLbl.frame = NSMakeRect(12, 39, 38, 16);
     [pointerBox addSubview:minLbl];
 
     NSTextField *maxLbl = [NSTextField labelWithString:@"Fast"];
     maxLbl.font = [NSFont systemFontOfSize:11];
     maxLbl.alignment = NSTextAlignmentRight;
-    maxLbl.frame = NSMakeRect(398, 19, 38, 16);
+    maxLbl.frame = NSMakeRect(398, 39, 38, 16);
     [pointerBox addSubview:maxLbl];
 
-    self.slider = [[NSSlider alloc] initWithFrame:NSMakeRect(54, 16, 340, 24)];
+    self.slider = [[NSSlider alloc] initWithFrame:NSMakeRect(54, 36, 340, 24)];
     self.slider.minValue = 1;
     self.slider.maxValue = 9;
     self.slider.numberOfTickMarks = 9;
@@ -517,12 +533,31 @@ static SettingsWindowController *g_settings = nil;
         [NSString stringWithFormat:@"%d / 9", s_sensitivity]];
     self.valueLabel.hidden = YES;
 
+    self.applyStatus = [NSTextField labelWithString:@""];
+    self.applyStatus.font = [NSFont systemFontOfSize:11];
+    self.applyStatus.frame = NSMakeRect(12, 12, 270, 16);
+    [pointerBox addSubview:self.applyStatus];
+
+    self.slowTestButton = [NSButton buttonWithTitle:@"Try 1" target:self
+                                             action:@selector(trySlow:)];
+    self.slowTestButton.bezelStyle = NSBezelStyleRounded;
+    self.slowTestButton.frame = NSMakeRect(302, 5, 62, 26);
+    self.slowTestButton.toolTip = @"Apply the slowest hardware level for comparison.";
+    [pointerBox addSubview:self.slowTestButton];
+
+    self.fastTestButton = [NSButton buttonWithTitle:@"Try 9" target:self
+                                             action:@selector(tryFast:)];
+    self.fastTestButton.bezelStyle = NSBezelStyleRounded;
+    self.fastTestButton.frame = NSMakeRect(370, 5, 62, 26);
+    self.fastTestButton.toolTip = @"Apply the fastest hardware level for comparison.";
+    [pointerBox addSubview:self.fastTestButton];
+
     self.preferredCheck = [NSButton checkboxWithTitle:@"ThinkPad Preferred Scrolling"
                            target:self action:@selector(togglePreferredScroll:)];
-    self.preferredCheck.frame = NSMakeRect(28, 226, 420, 22);
+    self.preferredCheck.frame = NSMakeRect(28, 205, 420, 22);
     [windowsView addSubview:self.preferredCheck];
 
-    NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(20, 211, 448, 1)];
+    NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(20, 190, 448, 1)];
     separator.boxType = NSBoxSeparator;
     [windowsView addSubview:separator];
 
@@ -635,11 +670,11 @@ static SettingsWindowController *g_settings = nil;
     extrasBox.title = @"macOS TrackPoint Extras";
     [macView addSubview:extrasBox];
 
-    NSTextField *scrollH = [NSTextField labelWithString:@"Scroll speed"];
-    scrollH.font = [NSFont systemFontOfSize:11];
-    scrollH.frame = NSMakeRect(14, 14, 78, 18);
-    [extrasBox addSubview:scrollH];
-    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(94, 11, 282, 22)];
+    self.scrollLabel = [NSTextField labelWithString:@"Scroll speed"];
+    self.scrollLabel.font = [NSFont systemFontOfSize:11];
+    self.scrollLabel.frame = NSMakeRect(14, 14, 150, 18);
+    [extrasBox addSubview:self.scrollLabel];
+    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(166, 11, 210, 22)];
     self.scrollSlider.minValue = 1.0;
     self.scrollSlider.maxValue = 8.0;
     self.scrollSlider.doubleValue = s_scrollSpeed;
@@ -665,7 +700,11 @@ static SettingsWindowController *g_settings = nil;
     BOOL directInput = tp_has_direct_input();
     if (accessible) s_accessibilityRequestAttempted = true;
 
-    if (!connected) {
+    if (!s_enabled) {
+        self.keyboardStatus.stringValue = @"TrackPointD: Paused — basic pointer remains active";
+        self.keyboardStatus.textColor = [NSColor secondaryLabelColor];
+        self.keyboardStatus.toolTip = nil;
+    } else if (!connected) {
         self.keyboardStatus.stringValue = @"Keyboard: Disconnected";
         self.keyboardStatus.textColor = [NSColor secondaryLabelColor];
         self.keyboardStatus.toolTip = nil;
@@ -702,11 +741,35 @@ static SettingsWindowController *g_settings = nil;
     self.fnLockCheck.state = s_fnLock ? NSControlStateValueOn : NSControlStateValueOff;
     self.preferredCheck.state = s_preferredScroll ? NSControlStateValueOn : NSControlStateValueOff;
 
+    self.slider.enabled = s_enabled;
+    self.slowTestButton.enabled = s_enabled && connected;
+    self.fastTestButton.enabled = s_enabled && connected;
+    self.preferredCheck.enabled = s_enabled;
+    self.fnLockCheck.enabled = s_enabled;
+    self.f18Check.enabled = s_enabled;
+    self.swapCheck.enabled = s_enabled;
+    self.scrollSlider.enabled = s_enabled;
+
     self.slider.integerValue = s_sensitivity;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", s_sensitivity];
+    if (!s_enabled)
+        self.applyStatus.stringValue = @"Paused · hardware speed remains on keyboard";
+    else if (!connected)
+        self.applyStatus.stringValue = @"Saved · applies when keyboard reconnects";
+    else if (s_hardwareSensitivity)
+        self.applyStatus.stringValue = [NSString stringWithFormat:
+            @"Level %d applied to keyboard ✓", s_sensitivity];
+    else
+        self.applyStatus.stringValue = [NSString stringWithFormat:
+            @"Level %d · software fallback active", s_sensitivity];
 
     self.scrollSlider.doubleValue = s_scrollSpeed;
     self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", s_scrollSpeed];
+    self.scrollLabel.stringValue = connected && tp_has_ble()
+        ? @"Horizontal speed (BLE)" : @"Scroll speed";
+    self.scrollLabel.toolTip = connected && tp_has_ble()
+        ? @"Bluetooth vertical scrolling is handled directly by macOS; this controls horizontal scrolling."
+        : @"Controls USB, horizontal, and compatibility scrolling.";
 
     [self updateF12Summary];
 }
@@ -720,6 +783,18 @@ static SettingsWindowController *g_settings = nil;
     [self syncState];
     LOG("sensitivity -> %d (%s)", val,
         s_hardwareSensitivity ? "hardware" : "software fallback");
+}
+
+- (void)trySlow:(id)sender {
+    (void)sender;
+    self.slider.integerValue = 1;
+    [self sliderChanged:self.slider];
+}
+
+- (void)tryFast:(id)sender {
+    (void)sender;
+    self.slider.integerValue = 9;
+    [self sliderChanged:self.slider];
 }
 
 - (void)scrollSliderChanged:(NSSlider *)slider {
@@ -1131,6 +1206,7 @@ static void open_privacy_settings(NSString *pane) {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSMenuItem   *connectionItem;
+@property (strong) NSMenuItem   *enabledItem;
 @property (strong) NSTimer      *accessTimer;
 - (void)refresh;
 - (void)openSettings:(id)sender;
@@ -1245,6 +1321,12 @@ static NSImage *status_icon(NSColor *dotColor) {
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    self.enabledItem = [[NSMenuItem alloc]
+        initWithTitle:@"TrackPointD Enabled"
+        action:@selector(toggleEnabled:) keyEquivalent:@""];
+    self.enabledItem.target = self;
+    [menu addItem:self.enabledItem];
+
     NSMenuItem *settingsItem = [[NSMenuItem alloc]
         initWithTitle:@"Settings..."
         action:@selector(openSettings:) keyEquivalent:@","];
@@ -1273,13 +1355,15 @@ static NSImage *status_icon(NSColor *dotColor) {
     BOOL connected  = tp_count() > 0;
     BOOL directInput = !connected || tp_has_direct_input();
 
-    BOOL needsAttention = !accessible || !inputAllowed || !directInput;
-    NSColor *dotColor = needsAttention ? [NSColor systemOrangeColor] :
+    BOOL needsAttention = s_enabled && (!accessible || !inputAllowed || !directInput);
+    NSColor *dotColor = !s_enabled ? [NSColor colorWithWhite:0.35 alpha:1.0] :
+                        needsAttention ? [NSColor systemOrangeColor] :
                         connected ? [NSColor colorWithSRGBRed:226.0 / 255.0
                                                        green:35.0 / 255.0
                                                         blue:26.0 / 255.0 alpha:1.0] :
                                     [NSColor colorWithWhite:0.35 alpha:1.0];
-    NSString *status = needsAttention ? @"TrackPointD needs attention" :
+    NSString *status = !s_enabled ? @"TrackPointD paused — basic pointer only" :
+                       needsAttention ? @"TrackPointD needs attention" :
                        connected ? @"TrackPoint Keyboard II connected" :
                                    @"TrackPoint Keyboard II disconnected";
     self.statusItem.button.title = @"";
@@ -1288,6 +1372,7 @@ static NSImage *status_icon(NSColor *dotColor) {
     self.statusItem.button.accessibilityLabel = status;
     self.connectionItem.title = status;
     self.connectionItem.image = status_icon(dotColor);
+    self.enabledItem.state = s_enabled ? NSControlStateValueOn : NSControlStateValueOff;
     [g_settings syncState];
 
     if (!accessible && !self.accessTimer) {
@@ -1297,6 +1382,26 @@ static NSImage *status_icon(NSColor *dotColor) {
         [self.accessTimer invalidate]; self.accessTimer = nil;
         try_create_event_tap();
     }
+}
+
+- (void)toggleEnabled:(id)sender {
+    (void)sender;
+    s_enabled = !s_enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:s_enabled forKey:PREF_ENABLED];
+    reset_gesture_state();
+
+    if (s_enabled) {
+        apply_hardware_settings();
+        apply_key_remap();
+        if (s_tap) CGEventTapEnable(s_tap, tp_count() > 0);
+    } else {
+        if (s_tap) CGEventTapEnable(s_tap, false);
+        apply_key_remap();
+        for (TPHIDDevice *ctx in s_tpDevices)
+            send_config_command(ctx->device, 0x09, 0);
+    }
+    [self refresh];
+    LOG("TrackPointD actions: %s", s_enabled ? "ON" : "PAUSED");
 }
 
 - (void)pollAccess:(NSTimer *)t {
@@ -1351,13 +1456,13 @@ static void apply_key_remap(void) {
     if (tp_count() == 0) return;
 
     NSMutableArray<NSString *> *items = [NSMutableArray array];
-    if (s_swapEnabled) {
+    if (s_enabled && s_swapEnabled) {
         [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_OPTION
                          ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_CMD "}"];
         [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_LEFT_CMD
                          ",\"HIDKeyboardModifierMappingDst\":" HID_LEFT_OPTION "}"];
     }
-    if (s_f18Enabled) {
+    if (s_enabled && s_f18Enabled) {
         [items addObject:@"{\"HIDKeyboardModifierMappingSrc\":" HID_RIGHT_OPTION
                          ",\"HIDKeyboardModifierMappingDst\":" HID_F18 "}"];
     }
@@ -1384,6 +1489,10 @@ static void apply_key_remap(void) {
 }
 
 static void apply_hardware_settings(void) {
+    if (!s_enabled) {
+        s_hardwareSensitivity = false;
+        return;
+    }
     bool sensitivityApplied = false;
     for (TPHIDDevice *ctx in s_tpDevices) {
         sensitivityApplied |= send_config_command(ctx->device, 0x02,
@@ -1661,11 +1770,13 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
         reset_gesture_state();
-        if (s_tap && tp_count() > 0) CGEventTapEnable(s_tap, true);
+        if (s_tap && s_enabled && tp_count() > 0) CGEventTapEnable(s_tap, true);
         LOG("event tap recovered after %s",
             type == kCGEventTapDisabledByTimeout ? "timeout" : "user disable");
         return event;
     }
+
+    if (!s_enabled) return event;
 
     bool isMove = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
                   type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
@@ -1758,9 +1869,10 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 }
 
 static void set_tap_enabled(bool enabled) {
-    if (s_tap) CGEventTapEnable(s_tap, enabled);
+    if (s_tap) CGEventTapEnable(s_tap, enabled && s_enabled);
     if (!enabled) reset_gesture_state();
-    LOG("ThinkPad %s — tap %s", enabled ? "connected" : "disconnected", enabled ? "ON" : "OFF");
+    LOG("ThinkPad %s — tap %s", enabled ? "connected" : "disconnected",
+        enabled && s_enabled ? "ON" : "OFF");
     if (enabled) apply_key_remap();
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
@@ -1790,9 +1902,9 @@ static void try_create_event_tap(void) {
         return;
     }
     CFRunLoopAddSource(CFRunLoopGetMain(), s_tapSource, kCFRunLoopCommonModes);
-    CGEventTapEnable(s_tap, tp_count() > 0);
+    CGEventTapEnable(s_tap, s_enabled && tp_count() > 0);
     LOG("unified tap created (kCGHIDEventTap) — %s",
-        tp_count() > 0 ? "ON" : "waiting for ThinkPad");
+        s_enabled && tp_count() > 0 ? "ON" : "waiting or paused");
     dispatch_async(dispatch_get_main_queue(), ^{ [g_app refresh]; });
 }
 
@@ -1934,7 +2046,9 @@ int main(int argc, const char *argv[]) {
             PREF_F12_URL: @"https://support.lenovo.com/accessories/trackpoint_keyboard",
             PREF_F12_TEXT: @"",
             PREF_F12_FILES: @[],
+            PREF_ENABLED: @YES,
         }];
+        s_enabled = [ud boolForKey:PREF_ENABLED];
         s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
         s_f18Enabled = [ud boolForKey:PREF_F18];
         s_swapEnabled = [ud boolForKey:PREF_SWAP];
@@ -1956,8 +2070,9 @@ int main(int argc, const char *argv[]) {
             s_f12Files = [validFiles copy];
         }
 
-        LOG("prefs: sensitivity=%d scroll=%.1f preferred=%s fnLock=%s f18=%s swap=%s",
-            s_sensitivity, s_scrollSpeed, s_preferredScroll ? "on" : "off",
+        LOG("prefs: enabled=%s sensitivity=%d scroll=%.1f preferred=%s fnLock=%s f18=%s swap=%s",
+            s_enabled ? "on" : "paused", s_sensitivity, s_scrollSpeed,
+            s_preferredScroll ? "on" : "off",
             s_fnLock ? "on" : "off", s_f18Enabled ? "on" : "off",
             s_swapEnabled ? "on" : "off");
 
