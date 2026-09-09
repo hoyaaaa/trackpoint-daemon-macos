@@ -97,8 +97,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>              <string>TrackPointD</string>
     <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
     <key>CFBundleExecutable</key>        <string>trackpointd</string>
-    <key>CFBundleShortVersionString</key><string>2.1.3</string>
-    <key>CFBundleVersion</key>           <string>6</string>
+    <key>CFBundleShortVersionString</key><string>2.1.4</string>
+    <key>CFBundleVersion</key>           <string>7</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>TrackPointD</string>
     <key>LSMinimumSystemVersion</key>    <string>12.0</string>

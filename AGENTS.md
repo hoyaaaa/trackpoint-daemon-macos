@@ -18,7 +18,7 @@ Do not broaden matching to every Lenovo device.
 IOHIDManager (exact VID/PID)
   ├─ IOHIDDeviceSetReport → speed, Fn Lock, Preferred Scrolling
   ├─ manager-owned input reports → wheel, deferred middle click, Lenovo hotkeys/F12
-  └─ manager-owned exact-device X/Y values → origin confirmation and PTS
+  └─ manager-owned exact-device X/Y values → origin confirmation
 
 hidutil --matching → device-only modifier/F18 remaps
 
@@ -60,8 +60,6 @@ hardware evidence.
   double-schedule, or create a second input queue for a matched device.
 - Resolve a value callback's device through `IOHIDElementGetDevice()`; older
   IOKit versions pass their internal queue as that callback's `sender`.
-- Cancel and release every PTS timer on replacement, disconnect, timeout, and
-  termination.
 - Do not write global mouse defaults or global acceleration properties.
 - Do not clear global `UserKeyMapping`; always use exact `hidutil --matching`.
 - Treat absent `com.apple.swipescrolldirection` as natural scrolling enabled.
@@ -70,15 +68,16 @@ hardware evidence.
 
 Real Keyboard II Windows settings are hardware speed, Preferred Scrolling, and
 F12 user action. Fn Lock is firmware. Modifier swaps, F18, natural direction,
-scroll-speed tuning, and legacy Press-to-Select are macOS additions. Do not call
-the old sigmoid curve or Keyboard II Press-to-Select “Windows parity.”
+and scroll-speed tuning are macOS additions. Keyboard II exposes no pressure/Z
+signal or native Press-to-Select command; do not emulate it from X/Y movement.
 
 ## Build and verify
 
 ```bash
 clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
   -o /tmp/trackpointd trackpointd.m \
-  -framework Cocoa -framework ApplicationServices -framework IOKit -lm
+  -framework Cocoa -framework ApplicationServices -framework CoreAudio \
+  -framework IOKit -lm
 /tmp/trackpointd --self-test
 bash -n install.sh
 bash -n uninstall.sh

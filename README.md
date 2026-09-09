@@ -25,7 +25,7 @@ drivers or third-party dependencies.
   and the user's global remaps are no longer touched.
 - Removes all global mouse acceleration/defaults changes.
 - Fixes the recursive middle-click event loop, event-tap state recovery, and
-  Press-to-Select timing, distance, re-arm, and direct-input delivery bugs.
+  exact-device input delivery.
 - Replaces the in-place installer with build, self-test, sign, verify, then a
   staged replacement with rollback.
 
@@ -55,7 +55,6 @@ final switch. After a denial or approval, the button becomes **Open Settings…*
 | Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
 | Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
 | Scroll Speed | USB, horizontal, and fallback multiplier; BLE vertical follows macOS | macOS adaptation |
-| Emulated Press-to-Select | A brief, small stick movement followed by a stop produces a left click; default off | Older UltraNav-inspired extra |
 
 Saved text is stored in macOS user defaults as plain text. Do not put passwords
 or sensitive personal information in the F12 text action.
@@ -95,7 +94,7 @@ shows a user-space stack rather than a custom kernel driver:
 | Volume and brightness keys/OSD | Handled by macOS when the host exposes the standard usages |
 | F4 microphone mute | Toggles the current default input through CoreAudio when that device exposes a writable mute control |
 | F8 Action Center | Adapted to macOS Notification Center using the documented Fn-N shortcut |
-| Win+P, SysRq/Break/Scroll Lock/Pause | Not emulated; no stable exact macOS equivalent |
+| F7 external-display management; SysRq/Break/Scroll Lock/Pause | Not emulated; no stable exact macOS equivalent |
 | Fn+4 sleep | Standard HID System Sleep report is left to macOS; no duplicate event is synthesized |
 | Swift Pair | Windows-only; use normal macOS Bluetooth pairing |
 | Pairing mode, LEDs, six-key assistive input | Keyboard firmware; no daemon implementation needed |
@@ -105,15 +104,10 @@ but the complete Windows experience is not a 100% clone. Windows-only OS
 integrations and Lenovo OSD behavior remain intentionally outside the parity
 claim.
 
-Natural scrolling, modifier swaps, F18, adjustable scroll speed, and legacy
-Press-to-Select are useful macOS additions, not Lenovo Windows features.
-
-Keyboard II exposes X/Y movement but no pressure/Z axis or native
-Press-to-Select command. Consequently, this option is an explicit software
-approximation: a completely vertical press that generates no X/Y input cannot
-be detected. The gesture detector uses exact-device input, rejects long or
-large movement, waits for the stick to stop, and fails closed if device origin
-cannot be confirmed.
+Natural scrolling, modifier swaps, F18, and adjustable scroll speed are useful
+macOS additions, not Lenovo Windows features. Press-to-Select is deliberately
+not included: Keyboard II exposes no pressure/Z signal or native command, so
+ordinary pointer movement cannot be distinguished reliably from a press.
 
 ## Requirements
 
@@ -189,7 +183,7 @@ other keyboard, global mouse setting, or privacy permission is changed.
 | Middle click | Hold pending; emit click only if no wheel report/movement occurred |
 | F12 and Lenovo hotkeys | Exact-device input-report callback |
 | Key remaps | `hidutil --matching` for this model only |
-| Emulated Press-to-Select | Manager-owned exact-device X/Y callback; no secondary HID queue |
+| Pointer-origin confirmation | Manager-owned exact-device X/Y callback; no secondary HID queue |
 | Software sensitivity fallback | One `kCGHIDEventTap`, fail-closed origin filter |
 
 Configuration reports, independently reconstructed from public protocol facts:
