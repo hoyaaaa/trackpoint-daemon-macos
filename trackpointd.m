@@ -1130,6 +1130,7 @@ static void open_privacy_settings(NSString *pane) {
    ══════════════════════════════════════════════════════════════ */
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSStatusItem *statusItem;
+@property (strong) NSMenuItem   *connectionItem;
 @property (strong) NSTimer      *accessTimer;
 - (void)refresh;
 - (void)openSettings:(id)sender;
@@ -1229,15 +1230,36 @@ static NSImage *status_icon(NSColor *dotColor) {
     self.statusItem.button.imageScaling = NSImageScaleProportionallyDown;
     NSMenu *menu = [NSMenu new];
 
+    NSMenuItem *identityItem = [[NSMenuItem alloc]
+        initWithTitle:@"TrackPointD" action:nil keyEquivalent:@""];
+    identityItem.enabled = NO;
+    NSImage *appIcon = [[[NSBundle mainBundle] imageForResource:@"TrackPointD"] copy];
+    appIcon.size = NSMakeSize(18, 18);
+    identityItem.image = appIcon;
+    [menu addItem:identityItem];
+
+    self.connectionItem = [[NSMenuItem alloc]
+        initWithTitle:@"TrackPoint Keyboard II" action:nil keyEquivalent:@""];
+    self.connectionItem.enabled = NO;
+    [menu addItem:self.connectionItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
     NSMenuItem *settingsItem = [[NSMenuItem alloc]
         initWithTitle:@"Settings..."
         action:@selector(openSettings:) keyEquivalent:@","];
     settingsItem.target = self;
     [menu addItem:settingsItem];
 
+    NSMenuItem *aboutItem = [[NSMenuItem alloc]
+        initWithTitle:@"About TrackPointD"
+        action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    aboutItem.target = NSApp;
+    [menu addItem:aboutItem];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit"
+    NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit TrackPointD"
                         action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
     [menu addItem:quit];
@@ -1264,6 +1286,8 @@ static NSImage *status_icon(NSColor *dotColor) {
     self.statusItem.button.image = status_icon(dotColor);
     self.statusItem.button.toolTip = status;
     self.statusItem.button.accessibilityLabel = status;
+    self.connectionItem.title = status;
+    self.connectionItem.image = status_icon(dotColor);
     [g_settings syncState];
 
     if (!accessible && !self.accessTimer) {
