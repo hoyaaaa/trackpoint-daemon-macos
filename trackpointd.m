@@ -1137,6 +1137,26 @@ static void open_privacy_settings(NSString *pane) {
 
 static AppDelegate *g_app = nil;
 
+static NSImage *status_icon(NSColor *dotColor) {
+    NSImage *image = [NSImage imageWithSize:NSMakeSize(18, 16)
+        flipped:NO drawingHandler:^BOOL(NSRect dstRect) {
+        (void)dstRect;
+        NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:
+            NSMakeRect(1, 2, 16, 12) xRadius:3 yRadius:3];
+        [[NSColor colorWithWhite:1.0 alpha:0.96] setFill];
+        [body fill];
+        [[NSColor colorWithWhite:0.0 alpha:0.35] setStroke];
+        body.lineWidth = 0.75;
+        [body stroke];
+
+        [dotColor setFill];
+        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(6.5, 5.5, 5, 5)] fill];
+        return YES;
+    }];
+    image.template = NO;
+    return image;
+}
+
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
@@ -1205,9 +1225,8 @@ static AppDelegate *g_app = nil;
 
 - (void)buildMenu {
     self.statusItem = [[NSStatusBar systemStatusBar]
-                       statusItemWithLength:NSVariableStatusItemLength];
-    self.statusItem.button.font = [NSFont monospacedSystemFontOfSize:12
-                                   weight:NSFontWeightMedium];
+                       statusItemWithLength:NSSquareStatusItemLength];
+    self.statusItem.button.imageScaling = NSImageScaleProportionallyDown;
     NSMenu *menu = [NSMenu new];
 
     NSMenuItem *settingsItem = [[NSMenuItem alloc]
@@ -1232,8 +1251,19 @@ static AppDelegate *g_app = nil;
     BOOL connected  = tp_count() > 0;
     BOOL directInput = !connected || tp_has_direct_input();
 
-    self.statusItem.button.title = (!accessible || !inputAllowed || !directInput) ? @"TP!" :
-                                    connected   ? @"TP+" : @"TP-";
+    BOOL needsAttention = !accessible || !inputAllowed || !directInput;
+    NSColor *dotColor = needsAttention ? [NSColor systemOrangeColor] :
+                        connected ? [NSColor colorWithSRGBRed:226.0 / 255.0
+                                                       green:35.0 / 255.0
+                                                        blue:26.0 / 255.0 alpha:1.0] :
+                                    [NSColor colorWithWhite:0.35 alpha:1.0];
+    NSString *status = needsAttention ? @"TrackPointD needs attention" :
+                       connected ? @"TrackPoint Keyboard II connected" :
+                                   @"TrackPoint Keyboard II disconnected";
+    self.statusItem.button.title = @"";
+    self.statusItem.button.image = status_icon(dotColor);
+    self.statusItem.button.toolTip = status;
+    self.statusItem.button.accessibilityLabel = status;
     [g_settings syncState];
 
     if (!accessible && !self.accessTimer) {

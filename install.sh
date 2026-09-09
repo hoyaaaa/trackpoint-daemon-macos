@@ -97,8 +97,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>              <string>TrackPointD</string>
     <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
     <key>CFBundleExecutable</key>        <string>trackpointd</string>
-    <key>CFBundleShortVersionString</key><string>2.1.4</string>
-    <key>CFBundleVersion</key>           <string>7</string>
+    <key>CFBundleShortVersionString</key><string>2.1.5</string>
+    <key>CFBundleVersion</key>           <string>8</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>TrackPointD</string>
     <key>LSMinimumSystemVersion</key>    <string>12.0</string>
@@ -171,8 +171,8 @@ else
     printf '[!] Could not register the Login Item. Add TrackPointD in Login Items manually.\n' >&2
 fi
 
-printf '\nDone. If the menu bar shows TP!, open:\n'
-printf '  TP! → Settings… → macOS Integration → Request Access…\n'
+printf '\nDone. If the menu bar icon has an orange center dot, open:\n'
+printf '  TrackPointD → Settings… → macOS Integration → Request Access…\n'
 printf 'macOS registers TrackPointD and opens the correct privacy pane; you approve the final switch.\n\n'
 printf 'Log: tail -f /tmp/trackpointd.log\n'
 printf 'Uninstall: bash %s/uninstall.sh\n' "$SCRIPT_DIR"

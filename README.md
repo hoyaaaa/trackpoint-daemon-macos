@@ -31,7 +31,9 @@ drivers or third-party dependencies.
 
 ## Settings UI
 
-Click `TP+`, `TP-`, or `TP!` in the menu bar, then **Settings…**.
+Click the white keyboard icon in the menu bar, then **Settings…**. Its center
+dot is red when connected, orange when attention is required, and dark gray
+when the keyboard is disconnected.
 
 The first tab follows Lenovo's Windows `Keyboard Properties → External
 TrackPoint Keyboard` page: keyboard graphic, nine-position `Slow`–`Fast`
@@ -160,7 +162,8 @@ its **Modify events** mode takes exclusive ownership, so TrackPointD cannot
 confirm TrackPoint movement. In Karabiner-Elements → **Devices**, turn off
 **Modify events** for **TrackPoint Keyboard II**. TrackPointD supplies its own
 device-only modifier remaps; other keyboards can remain enabled in Karabiner.
-If `TP!` remains after moving the stick, quit and reopen TrackPointD once.
+If the dot remains orange after moving the stick, quit and reopen TrackPointD
+once.
 
 ## Uninstall
 
