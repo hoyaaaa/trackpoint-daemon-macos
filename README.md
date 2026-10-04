@@ -64,6 +64,7 @@ final switch. After a denial or approval, the button becomes **Open Settings…*
 | Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
 | Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
 | Scroll Speed | Vertical and horizontal TrackPoint scrolling on USB and Bluetooth | macOS adaptation |
+| Block Middle Click | Swallows the middle-button click while the keyboard is connected, so middle-button scrolling no longer opens links in new tabs (off by default) | macOS adaptation |
 
 Saved text is stored in macOS user defaults as plain text. Do not put passwords
 or sensitive personal information in the F12 text action.
