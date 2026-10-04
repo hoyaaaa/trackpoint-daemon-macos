@@ -124,6 +124,9 @@ ordinary pointer movement cannot be distinguished reliably from a press.
 - ThinkPad TrackPoint Keyboard II:
   - USB receiver: VID `0x17EF`, PID `0x60EE`
   - Bluetooth LE: VID `0x17EF`, PID `0x60E1`
+- ThinkPad Compact Bluetooth Keyboard with TrackPoint (VID `0x17EF`, PID `0x6048`): detected for the
+  menu status, software pointer sensitivity and scroll speed. Hardware settings (pointer speed,
+  Fn Lock), F12 and the modifier remaps are not applied to this model.
 - Xcode Command Line Tools (`xcode-select --install`)
 - Accessibility and Input Monitoring permission for TrackPointD
 
