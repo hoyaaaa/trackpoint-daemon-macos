@@ -241,6 +241,26 @@ Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
 middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
 before a report is used.
 
+## Automated tests and merge requirements
+
+Run all non-interactive tests with `bash scripts/test.sh`. GitHub Actions runs
+this command on macOS for pull requests into main and pushes to main.
+
+Coverage includes configuration report construction, report decoding and malformed
+input rejection, F12 URL validation, sensitivity calculations and mixed-device
+origin state, gesture/wake resets, and middle-click/compatibility-scroll behavior.
+Tests intercept generated mouse events; they do not send input to macOS.
+
+These tests do **not** verify physical HID delivery, actual hardware settings,
+Bluetooth/USB reconnects, key remapping, F12 action execution, system hotkeys,
+permissions, settings persistence/UI, or installer rollback. Those still need
+integration or physical-device verification, especially on Compact.
+
+The `macOS tests` check must pass before merging into main. Code ownership is
+assigned to `@hoyaaaa` for all files; main requires one code-owner approval and
+dismisses approvals after new commits. GitHub does not let a PR author approve
+their own PR, including PRs authored through their account's automation.
+
 ## Build check
 
 ```bash
