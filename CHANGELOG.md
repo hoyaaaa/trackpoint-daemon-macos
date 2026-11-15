@@ -4,6 +4,14 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.3.2 — 2026-11-15
+
+### Changed
+- Replace the app icon with a borderless dark terminal shape and centered
+  TrackPoint-red circle. Share the menu bar's exact 16:12 body ratio, 5-unit
+  circle diameter and sRGB red (#E2231A); square app assets use transparent
+  padding instead of stretching the icon. Remove the menu icon's thin outline.
+
 ## 2.3.1 — 2026-11-15
 
 ### Fixed
