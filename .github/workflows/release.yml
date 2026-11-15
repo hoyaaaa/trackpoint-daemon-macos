@@ -1,0 +1,40 @@
+name: Prepare release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  test:
+    name: Release tests
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require a versioned main commit
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          python3 scripts/release.py --tag "$TAG"
+      - run: bash scripts/test.sh
+  draft:
+    name: Draft release assets
+    needs: test
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Prepare source package and draft release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py --tag "$TAG"
+          gh release create "$TAG" --verify-tag --draft --title "TrackPointD $TAG" \
+            --notes-file dist/RELEASE_NOTES.md dist/trackpointd-*.tar.gz dist/SHA256SUMS dist/trackpointd.rb

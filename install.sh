@@ -74,49 +74,7 @@ log() { printf '[+] %s\n' "$1"; }
 printf '%s\n' '==============================' ' TrackPointD install / upgrade' '=============================='
 
 log 'Building a complete staged app...'
-mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
-clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
-    -o "$STAGED_APP/Contents/MacOS/trackpointd" "$SCRIPT_DIR/trackpointd.m" \
-    -framework Cocoa \
-    -framework ApplicationServices \
-    -framework CoreAudio \
-    -framework IOKit \
-    -lm
-
-if [ -f "$SCRIPT_DIR/TrackPointD.icns" ]; then
-    cp "$SCRIPT_DIR/TrackPointD.icns" "$STAGED_APP/Contents/Resources/TrackPointD.icns"
-fi
-
-cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>        <string>com.user.trackpointd</string>
-    <key>CFBundleName</key>              <string>TrackPointD</string>
-    <key>CFBundleDisplayName</key>       <string>TrackPointD</string>
-    <key>CFBundleExecutable</key>        <string>trackpointd</string>
-    <key>CFBundleShortVersionString</key><string>2.2.1</string>
-    <key>CFBundleVersion</key>           <string>12</string>
-    <key>CFBundlePackageType</key>       <string>APPL</string>
-    <key>CFBundleIconFile</key>          <string>TrackPointD</string>
-    <key>LSMinimumSystemVersion</key>    <string>12.0</string>
-    <key>LSUIElement</key>               <true/>
-    <key>NSPrincipalClass</key>          <string>NSApplication</string>
-</dict>
-</plist>
-PLIST
-
-plutil -lint "$STAGED_APP/Contents/Info.plist" >/dev/null
-"$STAGED_APP/Contents/MacOS/trackpointd" --self-test
-if [ "$SIGNING_IDENTITY" = "-" ]; then
-    log 'Code signing: ad-hoc (permissions may need approval again after upgrades).'
-else
-    log 'Code signing: stable local Apple identity.'
-fi
-codesign --force --deep --sign "$SIGNING_IDENTITY" "$STAGED_APP"
-codesign --verify --deep --strict "$STAGED_APP"
+TRACKPOINTD_SIGN_IDENTITY="$SIGNING_IDENTITY" bash "$SCRIPT_DIR/scripts/build-app.sh" "$STAGED_APP"
 
 if $CHECK_ONLY; then
     INSTALL_COMPLETE=true

@@ -67,6 +67,9 @@ def scenario(mode, failure='', existing=True):
             text = text.replace('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
                                 str(fakebin / 'lsregister'))
             (source / name).write_text(text)
+        (source / 'scripts').mkdir()
+        shutil.copyfile(ROOT / 'scripts/build-app.sh', source / 'scripts/build-app.sh')
+        shutil.copyfile(ROOT / 'version.h', source / 'version.h')
         log = base / 'commands.jsonl'
         env = dict(os.environ, TEST_HOME=str(home), TEST_LOG=str(log), FAIL_STEP=failure,
                    TRACKPOINTD_SIGN_IDENTITY='-', TMPDIR=str(base),

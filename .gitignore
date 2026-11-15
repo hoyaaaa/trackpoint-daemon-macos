@@ -1,3 +1,5 @@
 .omc/
 *.o
 trackpointd.c
+dist/
+__pycache__/

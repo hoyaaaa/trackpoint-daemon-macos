@@ -22,6 +22,7 @@ frameworks or packages are needed. An assertion or failed command stops the run.
 | F12 editor / settings | Mode controls, URL rejection, text warning, save/cancel, duplicate/file-limit handling, selected-file removal, summaries, model text bounds, permission-request routing | runtime_test.m |
 | Installer | Build/self-test/sign/verify failures, verified upgrade/new install, move/open failure rollback, check-only behavior, non-app refusal, Login Item failure/legacy preservation, staging cleanup | installer_test.py |
 | Uninstaller | Existing/missing app, exact two Keyboard II mapping resets, legacy removal, unrelated-file preservation, argument rejection | installer_test.py |
+| Updates / releases / Homebrew | Semantic version comparison, stable-only metadata validation, update errors/timeouts/size limits/reentrancy, canonical notes URL and copied upgrade command, deterministic archives, version/tag agreement, notes extraction and source checksum | update_test.m, runtime_test.m, release_test.py, homebrew_test.py, formula_test.rb |
 | Real bundle build | App build, protocol self-test, Info.plist lint, ad-hoc code signing and signature verification in `--check` mode | install.sh --check |
 
 ## Safety and limits
