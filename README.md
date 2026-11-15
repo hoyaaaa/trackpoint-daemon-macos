@@ -225,6 +225,19 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
 /tmp/trackpointd --self-test
 ```
 
+The middle-click regression test intercepts generated events instead of sending
+mouse input to macOS. It checks scrolling and click suppression with the option
+on/off, native and compatibility click paths, other mouse buttons, pause, and
+keyboard disconnection:
+
+```bash
+clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
+  -o /tmp/trackpointd-middle-test tests/block_middle_test.m \
+  -framework Cocoa -framework ApplicationServices -framework CoreAudio \
+  -framework IOKit -lm
+/tmp/trackpointd-middle-test
+```
+
 ## Research sources and licensing
 
 - [Lenovo Windows download page](https://support.lenovo.com/us/en/downloads/ds543713-thinkpad-trackpoint-keyboard-ii-software-for-windows-7-windows-10)

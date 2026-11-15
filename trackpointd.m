@@ -669,7 +669,7 @@ static SettingsWindowController *g_settings = nil;
     self.blockMiddleCheck = [NSButton checkboxWithTitle:@"Block Middle Click"
                              target:self action:@selector(toggleBlockMiddleSetting:)];
     self.blockMiddleCheck.frame = NSMakeRect(14, 12, 410, 20);
-    self.blockMiddleCheck.toolTip = @"Ignore the middle-button click so scrolling with the TrackPoint does not open links in new tabs.";
+    self.blockMiddleCheck.toolTip = @"Block middle clicks from all pointing devices while a supported keyboard is connected. TrackPoint scrolling remains enabled.";
     [keysBox addSubview:self.blockMiddleCheck];
 
     NSBox *extrasBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 56, 452, 58)];
@@ -1830,15 +1830,11 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
         return event;
     }
 
-    /* "Block Middle Click": drop every middle-button event while a supported keyboard
-     * is connected. */
-    if (s_blockMiddle && tp_count() > 0 &&
+    /* Consume clicks only after the scrolling state machine has seen the button. */
+    bool blockMiddle = s_blockMiddle && tp_count() > 0 &&
         (type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp ||
          type == kCGEventOtherMouseDragged) &&
-        CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == 2) {
-        reset_compatibility_middle();
-        return NULL;
-    }
+        CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == 2;
 
     bool isMove = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
                   type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
@@ -1856,7 +1852,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
 
             if (type == kCGEventOtherMouseDown) {
-                if (!origin.middleButtonDownRecent) return event; /* fail closed */
+                if (!origin.middleButtonDownRecent) return blockMiddle ? NULL : event;
                 s_middleDown = true;
                 s_hasMoved = false;
                 s_lastPos = CGEventGetLocation(event);
@@ -1874,6 +1870,8 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
         }
     }
+
+    if (blockMiddle && !s_middleDown) return NULL;
 
     if (!isMove || tp_count() == 0) return event;
 
