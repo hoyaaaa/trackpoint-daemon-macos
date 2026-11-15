@@ -7,6 +7,7 @@
 #import <IOKit/hid/IOHIDKeys.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 
+static BOOL guideVisible;
 static NSMutableArray *events, *reports, *tasks, *urls;
 static BOOL trusted = YES, writableMute = YES, hasMute = YES;
 static int beeps, uiRefreshes, openedSettings, failedPID;
@@ -257,6 +258,23 @@ static CFRunLoopSourceRef tap_source(void) { return failTapSource ? NULL : (CFRu
 #define CFRunLoopAddSource(r,s,m) ((void)0)
 #define CFRunLoopRemoveSource(r,s,m) ((void)0)
 #define IOHIDDeviceGetProperty prop
+static NSArray *permissionWindows, *permissionApps;
+@interface TestRunningApp : NSObject
+@property pid_t processIdentifier;
++ (NSArray *)runningApplicationsWithBundleIdentifier:(NSString *)identifier;
+@end
+@implementation TestRunningApp
++ (NSArray *)runningApplicationsWithBundleIdentifier:(NSString *)identifier {
+    assert([identifier isEqualToString:@"com.apple.systempreferences"]);
+    return permissionApps;
+}
+@end
+static CFArrayRef permission_windows(CGWindowListOption options, CGWindowID window) {
+    assert(options==kCGWindowListOptionAll && window==kCGNullWindowID);
+    return (__bridge_retained CFArrayRef)(permissionWindows ?: @[]);
+}
+#define NSRunningApplication TestRunningApp
+#define CGWindowListCopyWindowInfo permission_windows
 #define IOHIDDeviceSetReport set_report
 #define IOHIDDeviceCopyMatchingElements config_elements
 #define IOHIDValueGetElement value_element
@@ -672,6 +690,13 @@ static void test_pointer_sensitivity_display(void) {
     s_enabled=NO; sync(settings,@selector(syncState));
     assert([settings.keyboardStatus.stringValue containsString:@"Paused"]);
     assert([settings.applyStatus.stringValue containsString:@"Paused"]);
+    settings.permissionGuide=[TPPermissionGuide new];
+    guideVisible=YES; trusted=NO;
+    [settings.permissionGuide showForAccessibility:YES]; assert(settings.permissionGuide.permissionTimer.valid);
+    SettingsWindowController *previousSettings=g_settings; g_settings=settings;
+    AppDelegate *delegate=[AppDelegate new];
+    [delegate settingsWindowClosed:nil]; assert(!settings.permissionGuide.permissionTimer);
+    g_settings=previousSettings; guideVisible=NO; trusted=YES;
     [settings.window close];
 }
 static void test_preferences_and_editor(void) {
@@ -756,7 +781,6 @@ static void test_preferences_and_editor(void) {
     assert(event && source==self); self.capturedItems=items; return nil;
 }
 @end
-static BOOL guideVisible;
 static BOOL test_guide_visible(id panel, SEL selector) { (void)panel; (void)selector; return guideVisible; }
 static void quiet_guide_front(id panel, SEL selector, id sender) {
     (void)panel; (void)selector; (void)sender;
@@ -809,6 +833,21 @@ static void test_permission_guide(void) {
     trusted=NO;
     [guide showForAccessibility:YES]; assert(guide.permissionTimer.valid);
     [guide close]; assert(!guide.permissionTimer);
+    TestRunningApp *settingsApp=[TestRunningApp new]; settingsApp.processIdentifier=42;
+    permissionApps=@[settingsApp];
+    NSDictionary *settingsBounds=CFBridgingRelease(CGRectCreateDictionaryRepresentation(CGRectMake(100,100,700,500)));
+    permissionWindows=@[@{(__bridge id)kCGWindowOwnerPID:@42, (__bridge id)kCGWindowLayer:@0,
+        (__bridge id)kCGWindowBounds:settingsBounds}];
+    [guide showForAccessibility:NO];
+    assert(guide.sawSettingsWindow && guide.permissionTimer.valid);
+    permissionWindows=@[]; [guide updatePermissionGuide]; assert(!guide.permissionTimer);
+    // Startup must allow the Settings window to appear asynchronously.
+    [guide showForAccessibility:NO]; assert(!guide.sawSettingsWindow && guide.permissionTimer.valid);
+    permissionWindows=@[@{(__bridge id)kCGWindowOwnerPID:@42, (__bridge id)kCGWindowLayer:@0,
+        (__bridge id)kCGWindowBounds:settingsBounds}];
+    [guide updatePermissionGuide]; assert(guide.sawSettingsWindow);
+    permissionApps=@[]; [guide updatePermissionGuide]; assert(!guide.permissionTimer);
+    permissionWindows=@[];
     guideVisible=NO;
     [guide showForAccessibility:NO];
     assert([guide.instructions.stringValue containsString:@"Input Monitoring"]);
