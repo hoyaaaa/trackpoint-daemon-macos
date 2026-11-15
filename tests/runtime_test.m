@@ -122,6 +122,10 @@ static NSString *suite;
 static NSArray<NSURL *> *selectedFiles;
 static NSModalResponse panelResponse=NSModalResponseOK;
 static int limitWarnings;
+static NSModalResponse updateChoice=NSAlertThirdButtonReturn;
+static NSString *alertTitle, *alertText, *copiedCommand;
+static int downloadCount;
+static void (^pendingDownload)(NSData *,NSURLResponse *,NSError *);
 @interface TestOpenPanel : NSObject
 @property BOOL canChooseFiles, canChooseDirectories, allowsMultipleSelection;
 @property(copy) NSString *message;
@@ -138,13 +142,47 @@ static int limitWarnings;
 @end
 @interface TestAlert : NSObject
 @property(copy) NSString *messageText, *informativeText;
+- (NSButton *)addButtonWithTitle:(NSString *)title;
+- (NSModalResponse)runModal;
 - (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSModalResponse))handler;
 @end
 @implementation TestAlert
+- (NSButton *)addButtonWithTitle:(NSString *)title { (void)title; return nil; }
+- (NSModalResponse)runModal { alertTitle=self.messageText; alertText=self.informativeText; return updateChoice; }
 - (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSModalResponse))handler {
     (void)window; (void)handler; limitWarnings++;
 }
 @end
+@interface TestDownload : NSObject
+- (void)resume;
+@end
+@implementation TestDownload
+- (void)resume {}
+@end
+@interface TestSession : NSObject
++ (instancetype)sharedSession;
+- (TestDownload *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *,NSURLResponse *,NSError *))handler;
+@end
+@implementation TestSession
++ (instancetype)sharedSession { static TestSession *s; if (!s) s=[self new]; return s; }
+- (TestDownload *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *,NSURLResponse *,NSError *))handler {
+    assert([request.URL.absoluteString isEqual:@"https://api.github.com/repos/hoyaaaa/trackpoint-daemon-macos/releases/latest"]);
+    assert(request.timeoutInterval==15 && [request valueForHTTPHeaderField:@"User-Agent"]);
+    pendingDownload=[handler copy]; downloadCount++; return [TestDownload new];
+}
+@end
+@interface TestPasteboard : NSObject
++ (instancetype)generalPasteboard;
+- (NSInteger)clearContents;
+- (BOOL)setString:(NSString *)text forType:(NSPasteboardType)type;
+@end
+@implementation TestPasteboard
++ (instancetype)generalPasteboard { static TestPasteboard *p; if (!p) p=[self new]; return p; }
+- (NSInteger)clearContents { copiedCommand=nil; return 0; }
+- (BOOL)setString:(NSString *)text forType:(NSPasteboardType)type { assert([type isEqual:NSPasteboardTypeString]); copiedCommand=[text copy]; return YES; }
+@end
+#define NSURLSession TestSession
+#define NSPasteboard TestPasteboard
 #define NSOpenPanel TestOpenPanel
 #define NSAlert TestAlert
 static NSMutableArray *managerCalls;
@@ -463,6 +501,37 @@ static void test_actions(void) {
     muteReadStatus=-1; assert(!toggle_default_input_mute()); muteReadStatus=0;
     muteWriteStatus=-1; assert(!toggle_default_input_mute()); muteWriteStatus=0;
 }
+static void finish_update(NSInteger status,NSData *data,NSError *error) {
+    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:[NSURL URLWithString:@"https://api.github.com/"]
+        statusCode:status HTTPVersion:@"HTTP/1.1" headerFields:nil];
+    assert(pendingDownload); pendingDownload(data,response,error); pendingDownload=nil;
+    assert(!g_app.checkingForUpdates);
+}
+static void test_update_requests(void) {
+    clear();
+    [g_app checkForUpdates:nil]; int count=downloadCount;
+    [g_app checkForUpdates:nil]; assert(downloadCount==count && g_app.checkingForUpdates);
+    finish_update(404,nil,nil); assert([alertText containsString:@"No stable release"]);
+    [g_app checkForUpdates:nil]; finish_update(403,nil,nil);
+    assert([alertText containsString:@"Could not check"]);
+    [g_app checkForUpdates:nil]; finish_update(200,[NSData data],nil);
+    assert([alertText containsString:@"Invalid release"]);
+    [g_app checkForUpdates:nil]; finish_update(200,[NSMutableData dataWithLength:1024*1024+1],nil);
+    assert([alertText containsString:@"too large"]);
+    [g_app checkForUpdates:nil]; finish_update(200,nil,[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorTimedOut userInfo:nil]);
+    assert([alertText containsString:@"Could not check"]);
+    NSDictionary *payload=@{@"tag_name":@"v99.0.0",@"draft":@NO,@"prerelease":@NO,@"body":@"notes"};
+    NSData *data=[NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+    updateChoice=NSAlertFirstButtonReturn; [g_app checkForUpdates:nil]; finish_update(200,data,nil);
+    assert([urls.lastObject hasSuffix:@"/releases/tag/v99.0.0"]);
+    updateChoice=NSAlertSecondButtonReturn; [g_app checkForUpdates:nil]; finish_update(200,data,nil);
+    assert([copiedCommand isEqual:@"brew update && brew upgrade hoyaaaa/trackpointd/trackpointd"]);
+    updateChoice=NSAlertThirdButtonReturn;
+    payload=@{@"tag_name":@"v0.0.0",@"draft":@NO,@"prerelease":@NO};
+    data=[NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
+    [g_app checkForUpdates:nil]; finish_update(200,data,nil);
+    assert([alertTitle isEqual:@"You’re up to date"]);
+}
 static void test_startup_preferences(void) {
     TestDefaults *defaults=[TestDefaults standardUserDefaults];
     [defaults removePersistentDomainForName:suite];
@@ -567,7 +636,7 @@ int main(void) {
         [NSApplication sharedApplication];
         g_app=[QuietApp new];
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
-        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_startup_preferences(); test_preferences_and_editor();
+        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];
         puts("runtime/device/action/preferences tests: ok (all external effects intercepted)");
     }

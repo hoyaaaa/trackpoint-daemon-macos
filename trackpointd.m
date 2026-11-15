@@ -23,6 +23,8 @@
 #import <mach/mach_time.h>
 #import <assert.h>
 #import <float.h>
+#import "version.h"
+#import "updates.h"
 
 /* ── Config ───────────────────────────────────────────────────── */
 #define TP_SENSITIVITY_DEFAULT  5   /* 1-9 scale, 5 = neutral */
@@ -1247,6 +1249,7 @@ static void open_privacy_settings(NSString *pane) {
    Menu bar UI
    ══════════════════════════════════════════════════════════════ */
 @interface AppDelegate : NSObject <NSApplicationDelegate>
+@property BOOL checkingForUpdates;
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSMenuItem   *connectionItem;
 @property (strong) NSMenuItem   *enabledItem;
@@ -1376,6 +1379,11 @@ static NSImage *status_icon(NSColor *dotColor) {
     settingsItem.target = self;
     [menu addItem:settingsItem];
 
+    NSMenuItem *updatesItem = [[NSMenuItem alloc]
+        initWithTitle:@"Check for Updates…" action:@selector(checkForUpdates:) keyEquivalent:@""];
+    updatesItem.target = self;
+    [menu addItem:updatesItem];
+
     NSMenuItem *aboutItem = [[NSMenuItem alloc]
         initWithTitle:@"About TrackPointD"
         action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
@@ -1390,6 +1398,57 @@ static NSImage *status_icon(NSColor *dotColor) {
     [menu addItem:quit];
 
     self.statusItem.menu = menu;
+}
+
+- (void)checkForUpdates:(id)sender {
+    (void)sender;
+    if (self.checkingForUpdates) return;
+    self.checkingForUpdates = YES;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:@"https://api.github.com/repos/hoyaaaa/trackpoint-daemon-macos/releases/latest"]
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:15];
+    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"TrackPointD/" TRACKPOINTD_VERSION forHTTPHeaderField:@"User-Agent"];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:
+        ^(NSData *data, NSURLResponse *response, NSError *networkError) {
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (id)response : nil;
+        NSString *failure = nil;
+        NSDictionary *update = nil;
+        if (networkError || !http || http.statusCode != 200) {
+            failure = http.statusCode == 404 ? @"No stable release has been published yet." :
+                @"Could not check for updates. Please try again later.";
+        } else if (data.length > 1024 * 1024) {
+            failure = @"Release information is too large.";
+        } else {
+            id payload = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+            update = available_release(payload, @TRACKPOINTD_VERSION, &failure);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.checkingForUpdates = NO;
+            NSAlert *alert = [NSAlert new];
+            alert.messageText = failure ? @"Update Check" : update ?
+                [NSString stringWithFormat:@"TrackPointD %@ is available", update[@"version"]] : @"You’re up to date";
+            alert.informativeText = failure ?: (update ?
+                [NSString stringWithFormat:@"Installed: %@\n\nTo upgrade with Homebrew:\nbrew update && brew upgrade hoyaaaa/trackpointd/trackpointd\n\nQuit TrackPointD before running this command, then reopen it. Source installations can use the new release’s installer. Privacy permissions may need approval again.", @TRACKPOINTD_VERSION] :
+                [NSString stringWithFormat:@"TrackPointD %@ is installed. No newer stable release is available.", @TRACKPOINTD_VERSION]);
+            if (update) {
+                [alert addButtonWithTitle:@"Release Notes"];
+                [alert addButtonWithTitle:@"Copy Upgrade Command"];
+                [alert addButtonWithTitle:@"Later"];
+                NSModalResponse choice = [alert runModal];
+                if (choice == NSAlertFirstButtonReturn)
+                    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:update[@"url"]]];
+                else if (choice == NSAlertSecondButtonReturn) {
+                    [[NSPasteboard generalPasteboard] clearContents];
+                    [[NSPasteboard generalPasteboard] setString:@"brew update && brew upgrade hoyaaaa/trackpointd/trackpointd"
+                        forType:NSPasteboardTypeString];
+                }
+            } else {
+                [alert addButtonWithTitle:@"OK"];
+                [alert runModal];
+            }
+        });
+    }] resume];
 }
 
 - (void)refresh {
@@ -2200,6 +2259,10 @@ static void load_preferences(void) {
 }
 
 int main(int argc, const char *argv[]) {
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        puts(TRACKPOINTD_VERSION);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return run_self_test();
     freopen("/tmp/trackpointd.log", "a", stderr);
     setvbuf(stderr, NULL, _IONBF, 0);

@@ -2,8 +2,11 @@
 
 ## Scope
 
-Single-file Objective-C menu bar app for the ThinkPad TrackPoint Keyboard II.
+Objective-C menu bar app for the ThinkPad TrackPoint Keyboard II.
 Keep it dependency-free and compatible with macOS 12+.
+Version metadata lives in `version.h`; follow `RELEASING.md` for changelog, tags
+and Homebrew promotion. Updates use only published stable GitHub Releases and
+never download or execute code from the app.
 
 Supported hardware (exact matching only):
 
