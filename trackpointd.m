@@ -96,6 +96,7 @@ static bool s_accessibilityRequestAttempted = false;
 @public
     IOHIDDeviceRef device;
     bool inputConfirmed;
+    bool hardwareSensitivityApplied;
     uint64_t lastPointerTime;
     uint64_t lastMiddleButtonTime;
     uint64_t lastNativeScrollTime;
@@ -386,6 +387,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     if (!self) return nil;
     device = (IOHIDDeviceRef)CFRetain(hidDevice);
     inputConfirmed = false;
+    hardwareSensitivityApplied = false;
     lastPointerTime = 0;
     lastMiddleButtonTime = 0;
     lastNativeScrollTime = 0;
@@ -465,7 +467,7 @@ static SettingsWindowController *g_settings = nil;
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered
         defer:NO];
-    win.title = @"TrackPoint Keyboard II Properties";
+    win.title = @"ThinkPad TrackPoint Keyboard Properties";
     win.releasedWhenClosed = NO;
     self = [super initWithWindow:win];
     if (!self) return nil;
@@ -481,7 +483,7 @@ static SettingsWindowController *g_settings = nil;
 
     /* Lenovo's Windows property page keeps its three settings together. */
     NSTabViewItem *windowsItem = [[NSTabViewItem alloc] initWithIdentifier:@"windows"];
-    windowsItem.label = @"External TrackPoint Keyboard";
+    windowsItem.label = @"Keyboard";
     NSView *windowsView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 488, 460)];
     windowsItem.view = windowsView;
     [tabs addTabViewItem:windowsItem];
@@ -687,6 +689,37 @@ static SettingsWindowController *g_settings = nil;
     self.scrollValueLabel.alignment = NSTextAlignmentRight;
     self.scrollValueLabel.frame = NSMakeRect(382, 14, 54, 18);
     [extrasBox addSubview:self.scrollValueLabel];
+
+    NSTabViewItem *supportItem = [[NSTabViewItem alloc] initWithIdentifier:@"support"];
+    supportItem.label = @"Supported Models";
+    NSView *supportView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 488, 460)];
+    supportItem.view = supportView;
+    [tabs addTabViewItem:supportItem];
+
+    NSTextField *models = [NSTextField wrappingLabelWithString:
+        @"TrackPoint Keyboard II\n"
+         "USB receiver: 17EF:60EE · Bluetooth LE: 17EF:60E1\n"
+         "Hardware speed, Fn Lock, F12 actions and device-only key remaps.\n\n"
+         "ThinkPad Compact Bluetooth Keyboard with TrackPoint\n"
+         "Bluetooth: 17EF:6048 · Experimental support\n"
+         "Device detection and software pointer sensitivity; scrolling needs hardware verification. "
+         "Hardware settings, F12 actions and key remaps are not implemented for this model."];
+    models.font = [NSFont systemFontOfSize:12];
+    models.frame = NSMakeRect(20, 210, 448, 230);
+    [supportView addSubview:models];
+
+    NSTextField *warning = [NSTextField wrappingLabelWithString:
+        @"Compact has NOT been verified on physical hardware. Please test connection/reconnection, "
+         "pointer levels 1 and 9, middle click, and vertical/horizontal scrolling at different speeds. "
+         "Report results with your macOS version and model/VID:PID at:\n"
+         "github.com/hoyaaaa/trackpoint-daemon-macos/issues\n\n"
+         "With multiple keyboards, sensitivity is applied per device. If their movement overlaps, "
+         "software scaling is skipped to avoid scaling a hardware-adjusted event twice."];
+    warning.font = [NSFont systemFontOfSize:12];
+    warning.textColor = [NSColor secondaryLabelColor];
+    warning.selectable = YES;
+    warning.frame = NSMakeRect(20, 20, 448, 180);
+    [supportView addSubview:warning];
 
     [tabs selectTabViewItem:windowsItem];
     [self syncState];
@@ -1489,10 +1522,11 @@ static void apply_hardware_settings(void) {
         s_hardwareSensitivity = false;
         return;
     }
-    bool sensitivityApplied = false;
+    bool sensitivityApplied = tp_count() > 0;
     for (TPHIDDevice *ctx in s_tpDevices) {
-        sensitivityApplied |= send_config_command(ctx->device, 0x02,
-                                                   (uint8_t)s_sensitivity);
+        ctx->hardwareSensitivityApplied = send_config_command(ctx->device, 0x02,
+                                                               (uint8_t)s_sensitivity);
+        sensitivityApplied &= ctx->hardwareSensitivityApplied;
         send_config_command(ctx->device, 0x05, s_fnLock ? 1 : 0);
         send_config_command(ctx->device, 0x09, s_preferredScroll ? 1 : 0);
     }
@@ -1698,6 +1732,7 @@ static void reset_compatibility_middle(void) {
 
 typedef struct {
     bool fromTrackPoint;
+    bool hardwareSensitivityRecent;
     bool middleButtonDownRecent;
     bool nativeScrollRecent;
     bool nativeMiddleActive;
@@ -1734,8 +1769,10 @@ static TPOrigin poll_trackpoint_origin(void) {
     uint64_t now = mach_absolute_time();
     for (TPHIDDevice *ctx in s_tpDevices) {
         if (ctx->inputConfirmed &&
-            elapsed_ns(now, ctx->lastPointerTime) < TP_RECENCY_NS)
+            elapsed_ns(now, ctx->lastPointerTime) < TP_RECENCY_NS) {
             origin.fromTrackPoint = true;
+            origin.hardwareSensitivityRecent |= ctx->hardwareSensitivityApplied;
+        }
         if (ctx->rawMiddleDown &&
             elapsed_ns(now, ctx->lastMiddleButtonTime) < TP_RECENCY_NS)
             origin.middleButtonDownRecent = true;
@@ -1884,7 +1921,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
     if (dx == 0.0 && dy == 0.0) return event;
 
     CGPoint newPosition = CGEventGetLocation(event);
-    if (!s_hardwareSensitivity) {
+    if (!origin.hardwareSensitivityRecent) {
         double factor = sensitivity_factor();
         double scaledX = dx * factor, scaledY = dy * factor;
         newPosition.x += scaledX - dx;
@@ -2060,6 +2097,29 @@ static int run_self_test(void) {
     assert(scaled_scroll_delta(-7, 2.0) == -14);
     assert(scaled_scroll_delta(1, 0.1) == 1);
     assert(scaled_scroll_delta(-1, 0.1) == -1);
+
+    /* Mixed models: only recent hardware-adjusted movement suppresses fallback. */
+    s_tpDevices = [NSMutableArray array];
+    TPHIDDevice *softwareDevice = [TPHIDDevice new];
+    TPHIDDevice *hardwareDevice = [TPHIDDevice new];
+    softwareDevice->inputConfirmed = hardwareDevice->inputConfirmed = true;
+    hardwareDevice->hardwareSensitivityApplied = true;
+    [s_tpDevices addObjectsFromArray:@[softwareDevice, hardwareDevice]];
+    softwareDevice->lastPointerTime = mach_absolute_time();
+    TPOrigin origin = poll_trackpoint_origin();
+    assert(origin.fromTrackPoint && !origin.hardwareSensitivityRecent);
+    hardwareDevice->lastPointerTime = mach_absolute_time();
+    origin = poll_trackpoint_origin();
+    assert(origin.fromTrackPoint && origin.hardwareSensitivityRecent);
+    softwareDevice->lastPointerTime = 0;
+    origin = poll_trackpoint_origin();
+    assert(origin.fromTrackPoint && origin.hardwareSensitivityRecent);
+    hardwareDevice->lastPointerTime = 0;
+    origin = poll_trackpoint_origin();
+    assert(!origin.fromTrackPoint && !origin.hardwareSensitivityRecent);
+    s_tpDevices = nil;
+    assert(!build_config_report(TP_COMPACT_PID, 0x02, 5, &spec, report, &length));
+    assert(!decode_hotkey_report(TP_COMPACT_PID, 0x05, bleHotkey, 3, &hotkey));
 
     puts("trackpointd self-test: ok");
     return 0;

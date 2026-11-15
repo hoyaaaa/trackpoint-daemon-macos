@@ -125,12 +125,35 @@ ordinary pointer movement cannot be distinguished reliably from a press.
   - USB receiver: VID `0x17EF`, PID `0x60EE`
   - Bluetooth LE: VID `0x17EF`, PID `0x60E1`
 - ThinkPad Compact Bluetooth Keyboard with TrackPoint (VID `0x17EF`, PID `0x6048`): detected for the
-  menu status, software pointer sensitivity and scroll speed. Hardware settings (pointer speed,
-  Fn Lock), F12 and the modifier remaps are not applied to this model.
+  menu status and software pointer sensitivity. Scrolling and scroll-speed adjustment require
+  physical-hardware verification. Hardware settings (pointer speed, Fn Lock), F12 and the
+  modifier remaps are not implemented for this model.
 - Xcode Command Line Tools (`xcode-select --install`)
 - Accessibility and Input Monitoring permission for TrackPointD
 
-Other Lenovo devices no longer activate the daemon.
+Other Lenovo devices do not activate the daemon. The settings window's
+**Supported Models** tab lists these models and their limitations.
+
+### Compact support: experimental, hardware verification needed
+
+**Compact support has not been verified on physical hardware.** Passing the build
+and protocol self-tests does not establish that this keyboard works correctly.
+If you own this model, please [report your test results](https://github.com/hoyaaaa/trackpoint-daemon-macos/issues),
+including macOS version, model/VID:PID, and which checks passed or failed:
+
+- Detection, disconnect/reconnect, and sleep/wake recovery.
+- Pointer sensitivity at levels 1 and 9.
+- Middle click without movement and middle-button scrolling on both axes.
+- Scroll-speed adjustment on both axes; check for duplicate scrolls or unwanted clicks.
+- Ordinary typing and modifiers remain unchanged.
+- If available, repeat with a Keyboard II also connected.
+
+With multiple keyboards connected, hardware sensitivity success is tracked per
+device, so a Keyboard II does not disable Compact's software fallback. Input
+origin is inferred from recent device movement; when hardware-adjusted and
+software-adjusted devices move within the same 50 ms window, software scaling
+is skipped to avoid applying sensitivity twice. Simultaneous use is also
+unverified on physical hardware.
 
 ## Install or upgrade
 
