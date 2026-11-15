@@ -4,6 +4,14 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## Unreleased
+
+### Changed
+- Render in-app release notes with styled headings, bullet/numbered lists,
+  hanging indents, emphasis and code fonts instead of raw Markdown markers.
+  Parse locally with native macOS support; keep upgrade/error logs as plain text
+  and do not load remote images, HTML or active links.
+
 ## 2.5.1 — 2026-11-15
 
 ### Fixed

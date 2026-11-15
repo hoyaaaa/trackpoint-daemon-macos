@@ -81,8 +81,8 @@ Developer ID distribution and notarization require a separate signing setup;
 this release pipeline deliberately distributes source, not a publicly signed app.
 
 The app's update check is user-triggered and uses GitHub's latest published
-stable release endpoint with a timeout. Patch notes appear as plain text inside
-the app. An explicit **Upgrade and Reopen** button is available only for standard
+stable release endpoint with a timeout. Patch notes use native Markdown parsing with styled headings, lists and inline
+text inside the app; remote images, HTML and active links are not rendered. An explicit **Upgrade and Reopen** button is available only for standard
 Homebrew installations under `/opt/homebrew` or `/usr/local`. It fast-forwards only the clean official TrackPointD tap on main,
 then runs the fixed local brew upgrade operation, requires the formula version to match the release,
 verifies the resulting bundle/version/self-test, and reopens after the old process

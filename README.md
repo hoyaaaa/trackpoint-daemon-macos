@@ -18,7 +18,8 @@ TrackPointD enhancements pause during installation; preferences are preserved.
 An error shows details and restores the previous enabled/paused state. If a
 release has not reached the brew formula yet, installation waits for a later try.
 Source installations can use **Release Page** instead. Checks remain manual;
-release text is displayed as plain text and never executed.
+release notes render headings, lists, emphasis and code locally. Remote images,
+HTML and active links are not loaded or executed.
 See [CHANGELOG.md](CHANGELOG.md) for patch notes and [RELEASING.md](RELEASING.md)
 for versioning, release publication and package promotion.
 
