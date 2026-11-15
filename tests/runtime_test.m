@@ -765,9 +765,11 @@ static void test_permission_guide(void) {
     NSRect screen=NSMakeRect(0,0,1440,900);
     NSSize size=NSMakeSize(280,260);
     NSRect right=permission_guide_frame(NSMakeRect(100,200,700,600),screen,size);
-    assert(right.origin.x==812 && NSMaxY(right)==800);
+    assert(right.origin.x==310 && right.origin.y==0);
     NSRect left=permission_guide_frame(NSMakeRect(700,200,700,600),screen,size);
-    assert(left.origin.x==408);
+    assert(left.origin.x==910 && left.origin.y==0);
+    NSRect below=permission_guide_frame(NSMakeRect(100,400,700,400),screen,size);
+    assert(NSMidX(below)==450 && NSMaxY(below)==388); // Centered, 12 points below settings.
     NSRect clamped=permission_guide_frame(NSMakeRect(-100,-500,1500,1600),screen,size);
     assert(NSContainsRect(screen,clamped));
     NSRect secondary=NSMakeRect(-1280,-200,1280,900);

@@ -4,6 +4,12 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.4.1 — 2026-11-15
+
+### Changed
+- Center the draggable permission helper below System Settings instead of beside
+  it, keeping the helper on screen when there is not enough room underneath.
+
 ## 2.4.0 — 2026-11-15
 
 ### Added

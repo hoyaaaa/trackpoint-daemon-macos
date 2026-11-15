@@ -216,7 +216,7 @@ verifies it, and only then replaces the installed copy. A failed upgrade rolls
 back to the previous app.
 
 Grant both permissions. In **Settings → macOS Integration**, click the button
-beside each permission. A small helper window stays beside the macOS settings
+beside each permission. A small helper window stays below the macOS settings
 window: drag its TrackPointD icon into the permission list, then turn it on.
 The icon points to the running `.app`, including Homebrew's current version.
 Use **Show in Finder** or the settings pane's **+** button if dragging is unavailable.
