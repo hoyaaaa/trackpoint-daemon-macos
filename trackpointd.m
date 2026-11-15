@@ -468,10 +468,9 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
 @end
 
 static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size) {
-    CGFloat x = NSMaxX(settings) + 12;
-    if (x + size.width > NSMaxX(screen)) x = NSMinX(settings) - size.width - 12;
+    CGFloat x = NSMidX(settings) - size.width / 2;
     x = MAX(NSMinX(screen), MIN(x, NSMaxX(screen) - size.width));
-    CGFloat y = MAX(NSMinY(screen), MIN(NSMaxY(settings) - size.height,
+    CGFloat y = MAX(NSMinY(screen), MIN(NSMinY(settings) - size.height - 12,
                                       NSMaxY(screen) - size.height));
     return NSMakeRect(x, y, size.width, size.height);
 }
