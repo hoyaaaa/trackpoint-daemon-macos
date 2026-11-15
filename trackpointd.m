@@ -1625,7 +1625,7 @@ static NSImage *status_icon(NSColor *dotColor) {
     NSAlert *alert=[NSAlert new];
     alert.messageText=installed ? @"Update installed — reopen TrackPointD" : @"Could not upgrade TrackPointD";
     alert.informativeText=installed ? @"Please reopen TrackPointD manually. Your settings are preserved." : @"The upgrade did not complete. Your settings are preserved. Details are shown below.";
-    alert.accessoryView=release_notes_view(failure ?: @"No further details available.");
+    alert.accessoryView=plain_text_view(failure ?: @"No further details available.");
     [alert addButtonWithTitle:@"OK"]; [alert runModal];
 }
 

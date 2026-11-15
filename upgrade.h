@@ -10,14 +10,83 @@ static NSDictionary *homebrew_installation(NSString *bundlePath) {
     }
     return nil;
 }
-static NSScrollView *release_notes_view(NSString *notes) {
+static NSAttributedString *render_release_notes(NSString *markdown) {
+    NSString *input=[markdown stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length ? markdown : @"No release notes were provided.";
+    NSAttributedString *parsed=[[NSAttributedString alloc] initWithMarkdownString:input
+        options:nil baseURL:nil error:NULL];
+    if (!parsed.length) parsed=[[NSAttributedString alloc] initWithString:input];
+    NSMutableAttributedString *result=[NSMutableAttributedString new];
+    NSMutableSet<NSNumber *> *listItems=[NSMutableSet set];
+    [parsed enumerateAttribute:NSPresentationIntentAttributeName inRange:NSMakeRange(0,parsed.length)
+        options:0 usingBlock:^(NSPresentationIntent *intent, NSRange range, BOOL *stop) {
+        (void)stop;
+        NSAttributedString *source=[parsed attributedSubstringFromRange:range];
+        if (![source.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length) return;
+        NSInteger heading=0, depth=0;
+        NSPresentationIntent *item=nil;
+        BOOL ordered=NO, codeBlock=NO;
+        for (NSPresentationIntent *part=intent; part; part=part.parentIntent) {
+            if (part.intentKind==NSPresentationIntentKindHeader) heading=part.headerLevel;
+            if (part.intentKind==NSPresentationIntentKindCodeBlock) codeBlock=YES;
+            if (part.intentKind==NSPresentationIntentKindListItem && !item) {
+                item=part; ordered=part.parentIntent.intentKind==NSPresentationIntentKindOrderedList;
+            }
+            if (part.intentKind==NSPresentationIntentKindOrderedList || part.intentKind==NSPresentationIntentKindUnorderedList) depth++;
+        }
+        NSFont *font=heading ? [NSFont boldSystemFontOfSize:heading==1 ? 20 : heading==2 ? 17 : 15] :
+            codeBlock ? [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular] : [NSFont systemFontOfSize:13];
+        NSMutableParagraphStyle *style=[NSMutableParagraphStyle new];
+        style.lineSpacing=3;
+        style.paragraphSpacing=heading ? 8 : 7;
+        style.paragraphSpacingBefore=heading && result.length ? 10 : 0;
+        NSString *marker=@"";
+        if (item) {
+            style.firstLineHeadIndent=MAX(0,depth-1)*18;
+            style.headIndent=style.firstLineHeadIndent+28;
+            style.tabStops=@[[[NSTextTab alloc] initWithTextAlignment:NSTextAlignmentLeft location:style.headIndent options:@{}]];
+            if (![listItems containsObject:@(item.identity)]) {
+                marker=ordered ? [NSString stringWithFormat:@"%ld.\t",(long)item.ordinal] : @"•\t";
+                [listItems addObject:@(item.identity)];
+            } else style.firstLineHeadIndent=style.headIndent;
+        }
+        NSDictionary *attributes=@{NSFontAttributeName:font,NSForegroundColorAttributeName:NSColor.labelColor,
+            NSParagraphStyleAttributeName:style};
+        // Rebuild from text and selected styling only: no remote images, HTML or active links.
+        NSMutableAttributedString *body=[[NSMutableAttributedString alloc] initWithString:source.string attributes:attributes];
+        [source enumerateAttribute:NSInlinePresentationIntentAttributeName inRange:NSMakeRange(0,source.length)
+            options:0 usingBlock:^(NSNumber *value, NSRange span, BOOL *innerStop) {
+            (void)innerStop;
+            NSInlinePresentationIntent inlineStyle=value.unsignedIntegerValue;
+            NSFont *inlineFont=(inlineStyle & NSInlinePresentationIntentCode) ?
+                [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightRegular] : font;
+            NSFontTraitMask traits=0;
+            if (inlineStyle & NSInlinePresentationIntentStronglyEmphasized) traits|=NSBoldFontMask;
+            if (inlineStyle & NSInlinePresentationIntentEmphasized) traits|=NSItalicFontMask;
+            if (traits) inlineFont=[NSFontManager.sharedFontManager convertFont:inlineFont toHaveTrait:traits];
+            [body addAttribute:NSFontAttributeName value:inlineFont range:span];
+            if (inlineStyle & NSInlinePresentationIntentStrikethrough)
+                [body addAttribute:NSStrikethroughStyleAttributeName value:@(NSUnderlineStyleSingle) range:span];
+            if (inlineStyle & NSInlinePresentationIntentSoftBreak)
+                [body.mutableString replaceOccurrencesOfString:@"\n" withString:@" " options:0 range:span];
+            if (inlineStyle & NSInlinePresentationIntentLineBreak)
+                [body.mutableString replaceOccurrencesOfString:@"\n" withString:@"\u2028" options:0 range:span];
+        }];
+        if (result.length) [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"
+            attributes:[result attributesAtIndex:result.length-1 effectiveRange:NULL]]];
+        [result appendAttributedString:[[NSAttributedString alloc] initWithString:marker attributes:attributes]];
+        [result appendAttributedString:body];
+    }];
+    return result;
+}
+
+static NSScrollView *plain_text_view(NSString *notes) {
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,480,240)];
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
     NSTextView *text = [[NSTextView alloc] initWithFrame:scroll.bounds];
     text.editable = NO;
     text.font = [NSFont systemFontOfSize:12];
-    text.textContainerInset = NSMakeSize(10,10);
+    text.textContainerInset = NSMakeSize(16,14);
     text.autoresizingMask = NSViewWidthSizable;
     text.textContainer.widthTracksTextView = YES;
     text.minSize = NSMakeSize(0,scroll.bounds.size.height);
@@ -26,8 +95,16 @@ static NSScrollView *release_notes_view(NSString *notes) {
     text.verticallyResizable = YES;
     text.horizontallyResizable = NO;
     text.string = notes.length ? notes : @"No release notes were provided.";
-    [text setAccessibilityLabel:@"Release notes"];
+    [text setAccessibilityLabel:@"Upgrade log"];
     scroll.documentView = text;
+    return scroll;
+}
+
+static NSScrollView *release_notes_view(NSString *notes) {
+    NSScrollView *scroll=plain_text_view(@"");
+    NSTextView *text=(NSTextView *)scroll.documentView;
+    [text.textStorage setAttributedString:render_release_notes(notes)];
+    [text setAccessibilityLabel:@"Release notes"];
     return scroll;
 }
 
@@ -82,7 +159,7 @@ static NSScrollView *release_notes_view(NSString *notes) {
     spinner.indeterminate = YES;
     [spinner startAnimation:nil];
     [window.contentView addSubview:spinner];
-    NSScrollView *scroll = release_notes_view(@"Starting…");
+    NSScrollView *scroll = plain_text_view(@"Starting…");
     scroll.frame = NSMakeRect(18,18,524,260);
     self.output = (NSTextView *)scroll.documentView;
     [window.contentView addSubview:scroll];
