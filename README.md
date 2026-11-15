@@ -12,13 +12,13 @@ upgrade command; it does not install updates or add background checks.
 See [CHANGELOG.md](CHANGELOG.md) for patch notes and [RELEASING.md](RELEASING.md)
 for versioning, release publication and package promotion.
 
-Homebrew support uses this repository as a custom tap. After these changes merge:
+Homebrew support uses this repository as a custom tap:
 
 ```bash
 brew tap hoyaaaa/trackpointd https://github.com/hoyaaaa/trackpoint-daemon-macos
 ```
 
-After the first stable Release and formula promotion:
+Install or upgrade the latest stable package:
 
 ```bash
 brew install hoyaaaa/trackpointd/trackpointd
@@ -26,7 +26,7 @@ brew update && brew upgrade hoyaaaa/trackpointd/trackpointd
 trackpointd
 ```
 
-Until then, only explicitly requested `--HEAD` development installs are available.
+`--HEAD` explicitly selects development builds instead of the stable Release.
 Quit TrackPointD before upgrading; use `trackpointd` to reopen afterward.
 Homebrew builds locally and does not register Login Items or grant permissions.
 Use one installation method at a time. Ad-hoc signatures can require privacy
