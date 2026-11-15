@@ -26,6 +26,27 @@ static IOReturn set_report(IOHIDDeviceRef dev, IOHIDReportType type, CFIndex rid
     return pid == failedPID || [((__bridge NSDictionary *)dev)[@"rejectConfig"] boolValue]
         ? kIOReturnError : kIOReturnSuccess;
 }
+static CFArrayRef config_elements(IOHIDDeviceRef dev,CFDictionaryRef matching,IOOptionBits options) {
+    assert(options==kIOHIDOptionsTypeNone);
+    NSDictionary *properties=(__bridge NSDictionary *)dev;
+    NSDictionary *match=(__bridge NSDictionary *)matching;
+    int pid=[properties[@kIOHIDProductIDKey] intValue];
+    int reportID=[match[@kIOHIDElementReportIDKey] intValue];
+    int type=[match[@kIOHIDElementTypeKey] intValue];
+    assert((pid==0x60EE && reportID==0x13 && type==kIOHIDElementTypeFeature) ||
+           (pid==0x60E1 && reportID==0x18 && type==kIOHIDElementTypeOutput));
+    if ([properties[@"elementsUnavailable"] boolValue]) return NULL;
+    if (properties[@"reportCapabilities"]) {
+        NSMutableArray *matches=[NSMutableArray array];
+        for (NSDictionary *capability in properties[@"reportCapabilities"])
+            if ([capability[@kIOHIDElementReportIDKey] intValue]==reportID &&
+                [capability[@kIOHIDElementTypeKey] intValue]==type)
+                [matches addObject:capability];
+        return (__bridge_retained CFArrayRef)matches;
+    }
+    bool supported=![properties[@"rejectConfig"] boolValue];
+    return (__bridge_retained CFArrayRef)(supported ? @[@YES] : @[]);
+}
 static void post(CGEventTapLocation tap, CGEventRef event) {
     assert(tap == kCGSessionEventTap);
     UniChar text[1001]; UniCharCount length = 0;
@@ -233,6 +254,7 @@ static CFRunLoopSourceRef tap_source(void) { return failTapSource ? NULL : (CFRu
 #define CFRunLoopRemoveSource(r,s,m) ((void)0)
 #define IOHIDDeviceGetProperty prop
 #define IOHIDDeviceSetReport set_report
+#define IOHIDDeviceCopyMatchingElements config_elements
 #define IOHIDValueGetElement value_element
 #define IOHIDElementGetDevice element_device
 #define IOHIDElementGetUsagePage element_page
@@ -562,6 +584,37 @@ static void test_startup_preferences(void) {
     assert(!s_enabled && s_blockMiddle && [s_f12Text isEqual:@"saved text"]);
     assert([s_f12URL isEqual:@"https://example.com/saved"]);
 }
+static void test_config_report_capability(void) {
+    clear();
+    /* Physical USB descriptor facts: keyboard output 00; vendor feature 04 only. */
+    for (NSDictionary *capability in @[
+        @{@kIOHIDElementTypeKey:@(kIOHIDElementTypeOutput),@kIOHIDElementReportIDKey:@0},
+        @{@kIOHIDElementTypeKey:@(kIOHIDElementTypeFeature),@kIOHIDElementReportIDKey:@4},
+        @{@kIOHIDElementTypeKey:@(kIOHIDElementTypeOutput),@kIOHIDElementReportIDKey:@0x13}
+    ]) {
+        NSDictionary *properties=@{@kIOHIDVendorIDKey:@(LENOVO_VID),
+            @kIOHIDProductIDKey:@(TP_USB_PID),@"reportCapabilities":@[capability]};
+        TPHIDDevice *auxiliary=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)properties];
+        assert(!send_config_command(auxiliary->device,2,6));
+        assert(!send_config_command(auxiliary->device,5,0));
+        assert(!send_config_command(auxiliary->device,9,1));
+        assert(!reports.count);
+    }
+    NSDictionary *properties=@{@kIOHIDVendorIDKey:@(LENOVO_VID),
+        @kIOHIDProductIDKey:@(TP_USB_PID), @"elementsUnavailable":@YES};
+    TPHIDDevice *unknown=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)properties];
+    assert(!send_config_command(unknown->device,2,6));
+    assert(!reports.count); /* Enumeration failure must not become a blind write. */
+    TPHIDDevice *usb=make_device(TP_USB_PID), *ble=make_device(TP_BLE_PID);
+    assert(send_config_command(usb->device,2,6));
+    assert(send_config_command(ble->device,2,6));
+    assert(reports.count==2);
+    assert([reports[0][@"type"] intValue]==kIOHIDReportTypeFeature && [reports[0][@"id"] intValue]==0x13);
+    assert([reports[1][@"type"] intValue]==kIOHIDReportTypeOutput && [reports[1][@"id"] intValue]==0x18);
+    failedPID=TP_USB_PID;
+    assert(!send_config_command(usb->device,2,6));
+    assert(reports.count==3); /* Supported report, real write failure: preserve fallback. */
+}
 static void test_pointer_sensitivity_display(void) {
     clear();
     QuietSettings *settings=[QuietSettings new];
@@ -577,6 +630,10 @@ static void test_pointer_sensitivity_display(void) {
     [s_tpDevices addObjectsFromArray:@[pointer,keys,vendor]];
     apply_hardware_settings();
     assert(pointer->hardwareSensitivityApplied && !keys->hardwareSensitivityApplied && !vendor->hardwareSensitivityApplied);
+    assert(reports.count==3); /* Never write configuration to keyboard/vendor collections. */
+    NSUInteger writes=reports.count;
+    assert(!send_config_command(keys->device,2,6) && !send_config_command(vendor->device,2,6));
+    assert(reports.count==writes);
     sync(settings,@selector(syncState));
     assert([settings.keyboardStatus.stringValue containsString:@"move TrackPoint"]);
     /* Real USB regression: other interfaces reject configuration, but do not move. */
@@ -688,7 +745,7 @@ int main(void) {
         [NSApplication sharedApplication];
         g_app=[QuietApp new];
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
-        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_pointer_sensitivity_display(); test_preferences_and_editor();
+        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];
         puts("runtime/device/action/preferences tests: ok (all external effects intercepted)");
     }

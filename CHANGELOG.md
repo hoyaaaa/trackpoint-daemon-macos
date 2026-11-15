@@ -7,6 +7,8 @@ Only published, non-prerelease GitHub Releases are offered as updates.
 ## Unreleased
 
 ### Fixed
+- Query interface report capabilities before sending hardware settings; do not
+  send pointer configuration to USB keyboard or vendor-only interfaces.
 - Sensitivity status now reflects interfaces with confirmed pointer input rather
   than treating configuration rejection by a USB keyboard's non-pointer
   interfaces as a global fallback. Mixed pointer devices are labeled separately;

@@ -230,6 +230,17 @@ static bool send_config_command(IOHIDDeviceRef dev, uint8_t command, uint8_t val
     CFIndex reportLength;
     if (!build_config_report(pid, command, value, &spec, report, &reportLength))
         return false;
+    /* USB collections share a PID but do not share configuration reports. */
+    NSDictionary *match = @{
+        @kIOHIDElementTypeKey: @(spec.type == kIOHIDReportTypeFeature
+            ? kIOHIDElementTypeFeature : kIOHIDElementTypeOutput),
+        @kIOHIDElementReportIDKey: @(spec.reportID),
+    };
+    CFArrayRef elements = IOHIDDeviceCopyMatchingElements(dev,
+        (__bridge CFDictionaryRef)match, kIOHIDOptionsTypeNone);
+    bool supported = elements && CFArrayGetCount(elements) > 0;
+    if (elements) CFRelease(elements);
+    if (!supported) return false;
     IOReturn ret = IOHIDDeviceSetReport(dev, spec.type, spec.reportID,
                                          report, reportLength);
     LOG("HID config pid=%04X report=%02X cmd=%02X value=%u: 0x%08X",
