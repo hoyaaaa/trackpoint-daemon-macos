@@ -4,6 +4,16 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.3.1 — 2026-11-15
+
+### Fixed
+- Query interface report capabilities before sending hardware settings; do not
+  send pointer configuration to USB keyboard or vendor-only interfaces.
+- Sensitivity status now reflects interfaces with confirmed pointer input rather
+  than treating configuration rejection by a USB keyboard's non-pointer
+  interfaces as a global fallback. Mixed pointer devices are labeled separately;
+  unconfirmed input is shown as awaiting verification.
+
 ## 2.3.0 — 2026-11-15
 
 ### Added

@@ -259,6 +259,10 @@ Configuration reports, independently reconstructed from public protocol facts:
 | BLE `60E1` | Output report `0x18`, 3 bytes | `18 command value` |
 
 Commands: `0x02` hardware speed, `0x05` Fn Lock, `0x09` Preferred Scrolling.
+The USB receiver exposes separate keyboard, pointer and vendor-only interfaces.
+Configuration is sent only to an interface advertising the required report;
+see [the USB interface investigation](docs/usb-interfaces.md). The vendor-only
+Feature `0x04` has no confirmed user-facing function and is left untouched.
 The undocumented Windows initialization command is deliberately not sent.
 
 The native wheel input report ID is `0x16` (22 decimal) on both USB and BLE.

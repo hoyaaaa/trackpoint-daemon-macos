@@ -9,10 +9,10 @@ frameworks or packages are needed. An assertion or failed command stops the run.
 | Device protocol | USB/BLE report types, bytes, padding, length/ID rejection, Compact configuration/hotkey exclusion | self-test, core_test.m |
 | Device matching/lifecycle | Exact VID/PID, unsupported device, duplicate attach, disconnect, pause/resume, wake reapply, shutdown cleanup | runtime_test.m |
 | HID manager / event tap | Callback registration order, exact device match list, delayed permission setup, tap creation failures, recovery and cleanup | runtime_test.m |
-| Hardware sensitivity / Fn Lock / scrolling settings | Requested commands/values, USB/BLE success/failure, Compact skip, per-device sensitivity fallback | runtime_test.m |
+| Hardware sensitivity / Fn Lock / scrolling settings | Requested commands/values, USB/BLE success/failure, Compact skip, per-device sensitivity fallback, unsupported interface/report-type rejection | runtime_test.m |
 | Modifier / F18 remaps | Every enabled/swap/F18 combination, exact device scoping, Compact exclusion, pause/shutdown clearing | runtime_test.m |
 | Native scrolling | USB axes, natural direction, BLE horizontal-only synthesis, one-shot BLE vertical scaling, expired pending scroll, malformed/paused/disabled input | runtime_test.m |
-| Pointer sensitivity | Unknown-origin pass-through, software scaling, hardware bypass, active-display clamping, mixed-device origin classification | runtime_test.m, self-test |
+| Pointer sensitivity | Unknown-origin pass-through, software scaling, hardware bypass, active-display clamping, mixed-device origin classification; real settings-label regressions for USB auxiliary interfaces, true fallback, mixed devices and wake | runtime_test.m, self-test |
 | Middle click / fallback scroll | Option on/off, native/deferred click, compatibility drag, ordinary mouse buttons, pause/disconnect, Preferred Scrolling off | block_middle_test.m |
 | Input callbacks | X/Y confirmation, standard/vendor middle button, BLE middle reports, hotkey deduplication/release | runtime_test.m |
 | F12 actions | Disabled, valid/rejected URL, existing/missing file, Unicode text and length cap, permissions | runtime_test.m, core_test.m |

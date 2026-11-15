@@ -71,7 +71,6 @@ static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
 static double  s_scrollSpeed = SCROLL_SPEED;
 static bool    s_preferredScroll = true;
 static bool    s_fnLock = false;
-static bool    s_hardwareSensitivity = false;
 static bool    s_naturalScroll = false;
 static double  s_scrollAccumX = 0.0;
 static double  s_scrollAccumY = 0.0;
@@ -131,6 +130,20 @@ static bool tp_has_direct_input(void) {
     for (TPHIDDevice *ctx in s_tpDevices)
         if (ctx->inputConfirmed) return true;
     return false;
+}
+
+/* Only interfaces that actually delivered pointer input determine the UI status. */
+static NSString *pointer_sensitivity_status(void) {
+    bool hardware = false, software = false;
+    for (TPHIDDevice *ctx in s_tpDevices) {
+        if (!ctx->inputConfirmed) continue;
+        if (ctx->hardwareSensitivityApplied) hardware = true;
+        else software = true;
+    }
+    if (hardware && software) return @"hardware + software";
+    if (hardware) return @"hardware";
+    if (software) return @"software fallback";
+    return @"unverified";
 }
 
 static IOHIDAccessType input_monitoring_access(void) {
@@ -217,6 +230,17 @@ static bool send_config_command(IOHIDDeviceRef dev, uint8_t command, uint8_t val
     CFIndex reportLength;
     if (!build_config_report(pid, command, value, &spec, report, &reportLength))
         return false;
+    /* USB collections share a PID but do not share configuration reports. */
+    NSDictionary *match = @{
+        @kIOHIDElementTypeKey: @(spec.type == kIOHIDReportTypeFeature
+            ? kIOHIDElementTypeFeature : kIOHIDElementTypeOutput),
+        @kIOHIDElementReportIDKey: @(spec.reportID),
+    };
+    CFArrayRef elements = IOHIDDeviceCopyMatchingElements(dev,
+        (__bridge CFDictionaryRef)match, kIOHIDOptionsTypeNone);
+    bool supported = elements && CFArrayGetCount(elements) > 0;
+    if (elements) CFRelease(elements);
+    if (!supported) return false;
     IOReturn ret = IOHIDDeviceSetReport(dev, spec.type, spec.reportID,
                                          report, reportLength);
     LOG("HID config pid=%04X report=%02X cmd=%02X value=%u: 0x%08X",
@@ -740,6 +764,7 @@ static SettingsWindowController *g_settings = nil;
     BOOL accessible = AXIsProcessTrusted();
     BOOL connected  = tp_count() > 0;
     BOOL directInput = tp_has_direct_input();
+    NSString *sensitivityStatus = pointer_sensitivity_status();
     if (accessible) s_accessibilityRequestAttempted = true;
 
     if (!s_enabled) {
@@ -757,9 +782,9 @@ static SettingsWindowController *g_settings = nil;
     } else {
         self.keyboardStatus.stringValue = [NSString stringWithFormat:
             @"Keyboard: Connected (%@ sensitivity)",
-            s_hardwareSensitivity ? @"hardware" : @"software fallback"];
+            sensitivityStatus];
         self.keyboardStatus.textColor = [NSColor systemGreenColor];
-        self.keyboardStatus.toolTip = nil;
+        self.keyboardStatus.toolTip = @"Based on devices with confirmed pointer input. Move each connected TrackPoint to verify it.";
     }
 
     IOHIDAccessType inputAccess = input_monitoring_access();
@@ -800,9 +825,14 @@ static SettingsWindowController *g_settings = nil;
         self.applyStatus.stringValue = @"Paused · hardware speed remains on keyboard";
     else if (!connected)
         self.applyStatus.stringValue = @"Saved · applies when keyboard reconnects";
-    else if (s_hardwareSensitivity)
+    else if (!directInput)
+        self.applyStatus.stringValue = @"Move TrackPoint to verify sensitivity";
+    else if ([sensitivityStatus isEqualToString:@"hardware"])
         self.applyStatus.stringValue = [NSString stringWithFormat:
-            @"Level %d applied to keyboard ✓", s_sensitivity];
+            @"Level %d · hardware sensitivity active", s_sensitivity];
+    else if ([sensitivityStatus isEqualToString:@"hardware + software"])
+        self.applyStatus.stringValue = [NSString stringWithFormat:
+            @"Level %d · hardware + software per device", s_sensitivity];
     else
         self.applyStatus.stringValue = [NSString stringWithFormat:
             @"Level %d · software fallback active", s_sensitivity];
@@ -823,7 +853,7 @@ static SettingsWindowController *g_settings = nil;
     apply_hardware_settings();
     [self syncState];
     LOG("sensitivity -> %d (%s)", val,
-        s_hardwareSensitivity ? "hardware" : "software fallback");
+        pointer_sensitivity_status().UTF8String);
 }
 
 - (void)trySlow:(id)sender {
@@ -1600,19 +1630,13 @@ static void apply_key_remap(void) {
 }
 
 static void apply_hardware_settings(void) {
-    if (!s_enabled) {
-        s_hardwareSensitivity = false;
-        return;
-    }
-    bool sensitivityApplied = tp_count() > 0;
+    if (!s_enabled) return;
     for (TPHIDDevice *ctx in s_tpDevices) {
         ctx->hardwareSensitivityApplied = send_config_command(ctx->device, 0x02,
                                                                (uint8_t)s_sensitivity);
-        sensitivityApplied &= ctx->hardwareSensitivityApplied;
         send_config_command(ctx->device, 0x05, s_fnLock ? 1 : 0);
         send_config_command(ctx->device, 0x09, s_preferredScroll ? 1 : 0);
     }
-    s_hardwareSensitivity = sensitivityApplied;
     dispatch_async(dispatch_get_main_queue(), ^{ [g_settings syncState]; });
 }
 
@@ -2097,7 +2121,6 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
     if (index == NSNotFound) return;
     [s_tpDevices removeObjectAtIndex:index];
     reset_gesture_state();
-    s_hardwareSensitivity = false;
     if (tp_count() > 0) apply_hardware_settings();
     set_tap_enabled(tp_count() > 0);
     LOG("TrackPoint Keyboard II disconnected");
