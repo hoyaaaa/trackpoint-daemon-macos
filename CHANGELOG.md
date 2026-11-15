@@ -4,6 +4,15 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.4.0 — 2026-11-15
+
+### Added
+- A floating permission helper exposes the running TrackPointD.app as a draggable
+  icon beside System Settings, with Show in Finder as a fallback. It follows
+  the settings window and closes after the selected permission is granted.
+- Both permission buttons open the matching settings pane after requesting access.
+  Permission approval remains manual; ad-hoc upgrades can require approval again.
+
 ## 2.3.2 — 2026-11-15
 
 ### Changed
