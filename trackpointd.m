@@ -477,6 +477,7 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
 
 @interface TPPermissionGuide : NSPanel
 @property BOOL forAccessibility;
+@property BOOL sawSettingsWindow;
 @property (strong) NSTimer *permissionTimer;
 @property (strong) NSTextField *instructions;
 @property (strong) TPPermissionIcon *applicationIcon;
@@ -485,7 +486,7 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
 @end
 @implementation TPPermissionGuide
 - (instancetype)init {
-    self = [super initWithContentRect:NSMakeRect(0,0,280,238)
+    self = [super initWithContentRect:NSMakeRect(0,0,320,294)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskNonactivatingPanel
         backing:NSBackingStoreBuffered defer:NO];
     if (!self) return nil;
@@ -494,7 +495,7 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
     self.level = NSFloatingWindowLevel;
     self.hidesOnDeactivate = NO;
     self.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
-    self.applicationIcon = [[TPPermissionIcon alloc] initWithFrame:NSMakeRect(104,140,72,72)];
+    self.applicationIcon = [[TPPermissionIcon alloc] initWithFrame:NSMakeRect(124,196,72,72)];
     NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
     if ([bundleURL.pathExtension.lowercaseString isEqualToString:@"app"])
         self.applicationIcon.applicationURL = bundleURL;
@@ -503,11 +504,11 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
     [self.applicationIcon setAccessibilityLabel:@"Drag TrackPointD to the permission list"];
     [self.contentView addSubview:self.applicationIcon];
     self.instructions = [NSTextField wrappingLabelWithString:@""];
-    self.instructions.frame = NSMakeRect(18,48,244,82);
+    self.instructions.frame = NSMakeRect(18,48,284,138);
     self.instructions.alignment = NSTextAlignmentCenter;
     [self.contentView addSubview:self.instructions];
     NSButton *reveal = [NSButton buttonWithTitle:@"Show in Finder" target:self action:@selector(revealApplication:)];
-    reveal.frame = NSMakeRect(70,12,140,28);
+    reveal.frame = NSMakeRect(90,12,140,28);
     [self.contentView addSubview:reveal];
     return self;
 }
@@ -518,8 +519,9 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
 }
 - (void)showForAccessibility:(BOOL)accessibility {
     self.forAccessibility = accessibility;
+    self.sawSettingsWindow = NO;
     self.instructions.stringValue = [NSString stringWithFormat:
-        @"Drag this app into the %@ list, then turn it on.\nIf dragging is unavailable, use + or Show in Finder.",
+        @"Drag this app into the %@ list, then turn it on.\nAlready enabled but still not allowed? Remove the old TrackPointD entry with −, then drag this app in again.\nmacOS may ask you to reopen the app.",
         accessibility ? @"Accessibility" : @"Input Monitoring"];
     [self.permissionTimer invalidate];
     [self center];
@@ -534,14 +536,16 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
     BOOL allowed = self.forAccessibility ? AXIsProcessTrusted() :
         input_monitoring_access() == kIOHIDAccessTypeGranted;
     if (allowed || !self.visible) { [self close]; return; }
-    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (![front.bundleIdentifier isEqualToString:@"com.apple.systempreferences"]) return;
-    /* Only window bounds are used: no window titles, screen capture or AX access. */
+    NSArray<NSRunningApplication *> *settingsApps =
+        [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.systempreferences"];
+    pid_t settingsPID = settingsApps.firstObject.processIdentifier;
+    /* Window bounds only; no screen recording, AX access or TCC database reads. */
     NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
-        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+        kCGWindowListOptionAll, kCGNullWindowID));
     for (NSDictionary *window in windows) {
-        if ([window[(__bridge id)kCGWindowOwnerPID] intValue] != front.processIdentifier ||
+        if (!settingsPID || [window[(__bridge id)kCGWindowOwnerPID] intValue] != settingsPID ||
             [window[(__bridge id)kCGWindowLayer] intValue] != 0) continue;
+        self.sawSettingsWindow = YES;
         CGRect bounds;
         if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)
                 window[(__bridge id)kCGWindowBounds], &bounds)) continue;
@@ -552,8 +556,12 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
             [self setFrame:permission_guide_frame(frame, screen.visibleFrame, self.frame.size) display:YES];
             return;
         }
+        return;
     }
+    // Allow System Settings to open before treating a missing window as closed.
+    if (self.sawSettingsWindow) [self close];
 }
+
 - (void)close {
     [self.permissionTimer invalidate];
     self.permissionTimer = nil;
@@ -1674,6 +1682,7 @@ static NSImage *status_icon(NSColor *dotColor) {
 }
 
 - (void)settingsWindowClosed:(NSNotification *)n {
+    [g_settings.permissionGuide close];
     [[NSNotificationCenter defaultCenter] removeObserver:self
         name:NSWindowWillCloseNotification object:g_settings.window];
     NSApp.activationPolicy = NSApplicationActivationPolicyAccessory;

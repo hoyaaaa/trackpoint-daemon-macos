@@ -220,7 +220,11 @@ beside each permission. A small helper window stays below the macOS settings
 window: drag its TrackPointD icon into the permission list, then turn it on.
 The icon points to the running `.app`, including Homebrew's current version.
 Use **Show in Finder** or the settings pane's **+** button if dragging is unavailable.
-The helper closes when that permission is granted; you can also close it manually.
+The helper closes after approval or when either settings window is closed.
+If TrackPointD is enabled in macOS but still not allowed in the app, remove its
+old entry with **−**, then drag the current app into the list again. This can be
+necessary after an ad-hoc upgrade; switching the old entry on does not replace
+its signing identity. Follow any macOS request to reopen the app.
 Only you can approve access. The helper does not change TCC or prevent macOS from
 requiring approval again after an ad-hoc-signed upgrade.
 

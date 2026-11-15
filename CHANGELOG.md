@@ -4,6 +4,15 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.4.2 — 2026-11-15
+
+### Fixed
+- Close the permission helper when the TrackPointD settings window or the macOS
+  settings window closes, including when System Settings quits in the background.
+- Explain how to replace an older TrackPointD permission entry after an ad-hoc
+  upgrade. An enabled switch for an old signature does not authorize the new app;
+  permission labels continue to reflect the OS access check.
+
 ## 2.4.1 — 2026-11-15
 
 ### Changed
