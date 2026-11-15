@@ -25,6 +25,7 @@
 #import <float.h>
 #import "version.h"
 #import "updates.h"
+#import "icon.h"
 
 /* ── Config ───────────────────────────────────────────────────── */
 #define TP_SENSITIVITY_DEFAULT  5   /* 1-9 scale, 5 = neutral */
@@ -1293,17 +1294,7 @@ static AppDelegate *g_app = nil;
 static NSImage *status_icon(NSColor *dotColor) {
     NSImage *image = [NSImage imageWithSize:NSMakeSize(18, 16)
         flipped:NO drawingHandler:^BOOL(NSRect dstRect) {
-        (void)dstRect;
-        NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:
-            NSMakeRect(1, 2, 16, 12) xRadius:3 yRadius:3];
-        [[NSColor colorWithWhite:1.0 alpha:0.96] setFill];
-        [body fill];
-        [[NSColor colorWithWhite:0.0 alpha:0.35] setStroke];
-        body.lineWidth = 0.75;
-        [body stroke];
-
-        [dotColor setFill];
-        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(6.5, 5.5, 5, 5)] fill];
+        draw_trackpoint_icon(dstRect, [NSColor colorWithWhite:1.0 alpha:0.96], dotColor);
         return YES;
     }];
     image.template = NO;
@@ -1490,9 +1481,7 @@ static NSImage *status_icon(NSColor *dotColor) {
     BOOL needsAttention = s_enabled && (!accessible || !inputAllowed || !directInput);
     NSColor *dotColor = !s_enabled ? [NSColor colorWithWhite:0.35 alpha:1.0] :
                         needsAttention ? [NSColor systemOrangeColor] :
-                        connected ? [NSColor colorWithSRGBRed:226.0 / 255.0
-                                                       green:35.0 / 255.0
-                                                        blue:26.0 / 255.0 alpha:1.0] :
+                        connected ? trackpoint_red() :
                                     [NSColor colorWithWhite:0.35 alpha:1.0];
     NSString *status = !s_enabled ? @"TrackPointD paused — basic pointer only" :
                        needsAttention ? @"TrackPointD needs attention" :

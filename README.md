@@ -1,5 +1,9 @@
 # TrackPointD for macOS
 
+<p align="center">
+  <img src="TrackPointD.png" width="160" alt="TrackPointD — dark rounded rectangle with a centered red TrackPoint dot">
+</p>
+
 A native menu bar companion for the Lenovo ThinkPad TrackPoint Keyboard II. It
 implements the useful parts of Lenovo's Windows control-panel software without
 drivers or third-party dependencies.

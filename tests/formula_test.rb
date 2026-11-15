@@ -14,7 +14,7 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
   prefix = root/"prefix"
   (build/"scripts").mkpath
   (prefix/"bin").mkpath
-  %w[trackpointd.m version.h updates.h TrackPointD.icns].each { |file| (build/file).write((source/file).binread) }
+  %w[trackpointd.m version.h updates.h icon.h TrackPointD.icns].each { |file| (build/file).write((source/file).binread) }
   (build/"scripts/build-app.sh").write((source/"scripts/build-app.sh").read)
   formula.define_singleton_method(:buildpath) { build }
   formula.define_singleton_method(:prefix) { prefix }
