@@ -64,6 +64,7 @@ final switch. After a denial or approval, the button becomes **Open Settings…*
 | Right Option → F18 | Convenient macOS input-source shortcut | macOS adaptation |
 | Left Opt ↔ Left Cmd | Mac-style physical modifier order | macOS adaptation |
 | Scroll Speed | Vertical and horizontal TrackPoint scrolling on USB and Bluetooth | macOS adaptation |
+| Block Middle Click | Swallows the middle-button click while the keyboard is connected, so middle-button scrolling no longer opens links in new tabs (off by default) | macOS adaptation |
 
 Saved text is stored in macOS user defaults as plain text. Do not put passwords
 or sensitive personal information in the F12 text action.
@@ -248,6 +249,19 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
   -framework Cocoa -framework ApplicationServices -framework CoreAudio \
   -framework IOKit -lm
 /tmp/trackpointd --self-test
+```
+
+The middle-click regression test intercepts generated events instead of sending
+mouse input to macOS. It checks scrolling and click suppression with the option
+on/off, native and compatibility click paths, other mouse buttons, pause, and
+keyboard disconnection:
+
+```bash
+clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
+  -o /tmp/trackpointd-middle-test tests/block_middle_test.m \
+  -framework Cocoa -framework ApplicationServices -framework CoreAudio \
+  -framework IOKit -lm
+/tmp/trackpointd-middle-test
 ```
 
 ## Research sources and licensing

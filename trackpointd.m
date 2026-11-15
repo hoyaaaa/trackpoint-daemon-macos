@@ -50,6 +50,7 @@
 #define PREF_F12_TEXT     @"tpF12Text"
 #define PREF_F12_FILES    @"tpF12Files"
 #define PREF_ENABLED      @"tpEnabled"
+#define PREF_BLOCK_MIDDLE @"tpBlockMiddleClick"
 
 #define LOG(fmt, ...) fprintf(stderr, "[tp] " fmt "\n", ##__VA_ARGS__)
 
@@ -63,6 +64,7 @@ static uint64_t          s_lastMiddleClickTime = 0;
 static bool    s_f18Enabled  = true;
 static bool    s_swapEnabled = true;
 static bool    s_enabled     = true;
+static bool    s_blockMiddle = false;  /* swallow the middle-button click (opens links in new tabs) */
 static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
 static double  s_scrollSpeed = SCROLL_SPEED;
 static bool    s_preferredScroll = true;
@@ -150,6 +152,7 @@ static void apply_key_remap(void);
 static void apply_hardware_settings(void);
 static void reset_gesture_state(void);
 static void reset_compatibility_middle(void);
+static void set_block_middle(bool on);
 static NSURL *validated_http_url(NSString *value);
 static void run_f12_action(void);
 static bool toggle_default_input_mute(void);
@@ -428,6 +431,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
 @property (strong) NSButton    *swapCheck;
 @property (strong) NSButton    *fnLockCheck;
 @property (strong) NSButton    *preferredCheck;
+@property (strong) NSButton    *blockMiddleCheck;
 @property (strong) NSSlider    *slider;
 @property (strong) NSTextField *valueLabel;
 @property (strong) NSTextField *applyStatus;
@@ -665,6 +669,11 @@ static SettingsWindowController *g_settings = nil;
                       target:self action:@selector(toggleSwap:)];
     self.swapCheck.frame = NSMakeRect(224, 35, 214, 20);
     [keysBox addSubview:self.swapCheck];
+    self.blockMiddleCheck = [NSButton checkboxWithTitle:@"Block Middle Click"
+                             target:self action:@selector(toggleBlockMiddleSetting:)];
+    self.blockMiddleCheck.frame = NSMakeRect(14, 12, 410, 20);
+    self.blockMiddleCheck.toolTip = @"Block middle clicks from all pointing devices while a supported keyboard is connected. TrackPoint scrolling remains enabled.";
+    [keysBox addSubview:self.blockMiddleCheck];
 
     NSBox *extrasBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 56, 452, 58)];
     extrasBox.title = @"macOS TrackPoint Extras";
@@ -771,11 +780,13 @@ static SettingsWindowController *g_settings = nil;
     self.swapCheck.state = s_swapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     self.fnLockCheck.state = s_fnLock ? NSControlStateValueOn : NSControlStateValueOff;
     self.preferredCheck.state = s_preferredScroll ? NSControlStateValueOn : NSControlStateValueOff;
+    self.blockMiddleCheck.state = s_blockMiddle ? NSControlStateValueOn : NSControlStateValueOff;
 
     self.slider.enabled = s_enabled;
     self.slowTestButton.enabled = s_enabled && connected;
     self.fastTestButton.enabled = s_enabled && connected;
     self.preferredCheck.enabled = s_enabled;
+    self.blockMiddleCheck.enabled = s_enabled;
     self.fnLockCheck.enabled = s_enabled;
     self.f18Check.enabled = s_enabled;
     self.swapCheck.enabled = s_enabled;
@@ -852,6 +863,10 @@ static SettingsWindowController *g_settings = nil;
     [[NSUserDefaults standardUserDefaults] setBool:s_fnLock forKey:PREF_FN_LOCK];
     apply_hardware_settings();
     LOG("Fn Lock: %s", s_fnLock ? "ON" : "OFF");
+}
+
+- (void)toggleBlockMiddleSetting:(NSButton *)btn {
+    set_block_middle(btn.state == NSControlStateValueOn);
 }
 
 - (void)togglePreferredScroll:(NSButton *)btn {
@@ -1477,6 +1492,14 @@ static void refresh_ui(void) {
     [g_app refresh];
 }
 
+static void set_block_middle(bool on) {
+    s_blockMiddle = on;
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:PREF_BLOCK_MIDDLE];
+    reset_gesture_state();
+    LOG("Block middle click: %s", on ? "ON" : "OFF");
+    refresh_ui();
+}
+
 /* ══════════════════════════════════════════════════════════════
    hidutil — kernel-level key remap
    ══════════════════════════════════════════════════════════════ */
@@ -1698,6 +1721,7 @@ static void handle_hotkey(uint16_t usage) {
 }
 
 static void post_middle_click(CGPoint point) {
+    if (s_blockMiddle) return; /* "Block Middle Click" option */
     uint64_t now = mach_absolute_time();
     if (elapsed_ns(now, s_lastMiddleClickTime) < 100000000ULL) return;
     s_lastMiddleClickTime = now;
@@ -1845,6 +1869,12 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
         return event;
     }
 
+    /* Consume clicks only after the scrolling state machine has seen the button. */
+    bool blockMiddle = s_blockMiddle && tp_count() > 0 &&
+        (type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp ||
+         type == kCGEventOtherMouseDragged) &&
+        CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == 2;
+
     bool isMove = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
                   type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
     bool isOtherButton = type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp;
@@ -1861,7 +1891,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
 
             if (type == kCGEventOtherMouseDown) {
-                if (!origin.middleButtonDownRecent) return event; /* fail closed */
+                if (!origin.middleButtonDownRecent) return blockMiddle ? NULL : event;
                 s_middleDown = true;
                 s_hasMoved = false;
                 s_lastPos = CGEventGetLocation(event);
@@ -1879,6 +1909,8 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             }
         }
     }
+
+    if (blockMiddle && !s_middleDown) return NULL;
 
     if (!isMove || tp_count() == 0) return event;
 
@@ -2144,8 +2176,10 @@ int main(int argc, const char *argv[]) {
             PREF_F12_TEXT: @"",
             PREF_F12_FILES: @[],
             PREF_ENABLED: @YES,
+            PREF_BLOCK_MIDDLE: @NO,
         }];
         s_enabled = [ud boolForKey:PREF_ENABLED];
+        s_blockMiddle = [ud boolForKey:PREF_BLOCK_MIDDLE];
         s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
         s_f18Enabled = [ud boolForKey:PREF_F18];
         s_swapEnabled = [ud boolForKey:PREF_SWAP];
