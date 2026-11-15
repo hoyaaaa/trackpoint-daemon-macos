@@ -12,8 +12,8 @@ drivers or third-party dependencies.
 
 The menu's **Check for Updates…** compares the running version with GitHub's
 latest published stable Release and shows its patch notes inside the app.
-For Homebrew installations, **Upgrade and Reopen** runs the existing local brew,
-shows progress, verifies the installed version/signature and reopens the app.
+For Homebrew installations, **Upgrade and Reopen** refreshes only the official TrackPointD tap,
+runs the existing local brew and shows progress, verifies the installed version/signature and reopens the app.
 TrackPointD enhancements pause during installation; preferences are preserved.
 An error shows details and restores the previous enabled/paused state. If a
 release has not reached the brew formula yet, installation waits for a later try.

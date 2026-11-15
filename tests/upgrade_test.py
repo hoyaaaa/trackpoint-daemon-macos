@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-for failure in ('', 'update', 'promotion', 'upgrade', 'signature', 'version', 'self-test'):
+for failure in ('', 'update', 'origin', 'branch', 'dirty', 'status', 'commits', 'promotion', 'upgrade', 'signature', 'version', 'self-test'):
     with tempfile.TemporaryDirectory(prefix='trackpointd-upgrade-test.') as directory:
         root = Path(directory)
         prefix = root / 'brew prefix'
@@ -18,9 +18,17 @@ for failure in ('', 'update', 'promotion', 'upgrade', 'signature', 'version', 's
         common = f'#!{sys.executable}\nimport os,sys,json\nfrom pathlib import Path\nfailure=os.environ.get("FAIL_STEP", "")\nwith open(os.environ["TEST_LOG"],"a") as f: f.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]])+"\\n")\n'
         brew = prefix / 'bin/brew'
         brew.write_text(common + '''command=sys.argv[1]
+if command == '--repo': print(str(Path(sys.argv[0]).parent.parent/'tap'))
 if command == 'info':
     print(json.dumps({'formulae':[{'versions':{'stable':'2.0.0' if failure=='promotion' else '9.0.0'}}]}))
 sys.exit(1 if failure==command else 0)
+''')
+        git = root / 'git'
+        git.write_text(common + '''command=sys.argv[3]
+if command=='remote': print('https://untrusted.example/tap' if failure=='origin' else 'https://github.com/hoyaaaa/trackpoint-daemon-macos.git')
+if command=='symbolic-ref': print('custom' if failure=='branch' else 'main')
+if command=='status' and failure=='dirty': print(' M local-file')
+sys.exit(1 if (failure=='update' and command=='fetch') or (failure=='status' and command=='status') or (failure=='commits' and command=='merge-base') else 0)
 ''')
         signature = root / 'codesign'
         signature.write_text(common + "sys.exit(1 if failure=='signature' else 0)\n")
@@ -28,11 +36,11 @@ sys.exit(1 if failure==command else 0)
         executable.write_text(common + '''if sys.argv[1]=='--version': print('8.0.0' if failure=='version' else '9.0.0')
 sys.exit(1 if failure=='self-test' and sys.argv[1]=='--self-test' else 0)
 ''')
-        for tool in (brew, signature, executable):
+        for tool in (brew, git, signature, executable):
             tool.chmod(0o700)
         # Redirect only a private copy; never execute real brew, open or codesign.
         text = (ROOT / 'scripts/upgrade.sh').read_text()
-        text = text.replace('/opt/homebrew', str(prefix)).replace('/usr/bin/codesign', str(signature))
+        text = text.replace('/opt/homebrew', str(prefix)).replace('/usr/bin/codesign', str(signature)).replace('/usr/bin/git', str(git))
         script = root / 'upgrade.sh'
         script.write_text(text)
         env = dict(os.environ, FAIL_STEP=failure, TEST_LOG=str(log))
@@ -40,8 +48,9 @@ sys.exit(1 if failure=='self-test' and sys.argv[1]=='--self-test' else 0)
                                 env=env, capture_output=True, text=True, errors="replace")
         assert (result.returncode == 0) == (not failure), (failure, result.stdout, result.stderr)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        assert calls[0] == ['brew', 'update']
-        if failure not in ('update', 'promotion'):
+        assert calls[0] == ['brew', '--repo', 'hoyaaaa/trackpointd']
+        assert ['brew', 'update'] not in calls
+        if failure not in ('update', 'origin', 'branch', 'dirty', 'status', 'commits', 'promotion'):
             assert ['brew', 'upgrade', 'hoyaaaa/trackpointd/trackpointd'] in calls
         else:
             assert not any(row[:2] == ['brew', 'upgrade'] for row in calls)

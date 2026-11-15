@@ -4,6 +4,14 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.5.1 — 2026-11-15
+
+### Fixed
+- Refresh only the official TrackPointD tap before in-app upgrades instead of
+  running a global brew update. Preserve unrelated Homebrew repositories and
+  refuse a modified tap, custom branch/source or local commits rather than
+  overwriting them.
+
 ## 2.5.0 — 2026-11-15
 
 ### Added

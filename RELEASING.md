@@ -83,8 +83,8 @@ this release pipeline deliberately distributes source, not a publicly signed app
 The app's update check is user-triggered and uses GitHub's latest published
 stable release endpoint with a timeout. Patch notes appear as plain text inside
 the app. An explicit **Upgrade and Reopen** button is available only for standard
-Homebrew installations under `/opt/homebrew` or `/usr/local`. It runs fixed local
-brew update/upgrade operations, requires the formula version to match the release,
+Homebrew installations under `/opt/homebrew` or `/usr/local`. It fast-forwards only the clean official TrackPointD tap on main,
+then runs the fixed local brew upgrade operation, requires the formula version to match the release,
 verifies the resulting bundle/version/self-test, and reopens after the old process
 exits. The native progress window temporarily pauses enhancements without saving
 that pause. Failures restore the old enabled/paused state and show bounded logs.

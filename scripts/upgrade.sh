@@ -25,8 +25,23 @@ case "$prefix" in "/opt/homebrew"|"/usr/local") ;; *) exit 2 ;; esac
 export PATH="$prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1
 formula=hoyaaaa/trackpointd/trackpointd
-echo 'Refreshing Homebrew…'
-"$brew" update
+echo 'Refreshing the TrackPointD package…'
+tap=$("$brew" --repo hoyaaaa/trackpointd)
+origin=$(/usr/bin/git -C "$tap" remote get-url origin)
+case "$origin" in
+    https://github.com/hoyaaaa/trackpoint-daemon-macos|https://github.com/hoyaaaa/trackpoint-daemon-macos.git|git@github.com:hoyaaaa/trackpoint-daemon-macos.git) ;;
+    *) echo 'The TrackPointD tap has an unexpected source; no changes made.' >&2; exit 5 ;;
+esac
+branch=$(/usr/bin/git -C "$tap" symbolic-ref --short HEAD)
+changes=$(/usr/bin/git -C "$tap" status --porcelain)
+[ "$branch" = main ] && [ -z "$changes" ] || {
+    echo 'The TrackPointD tap has local changes or a custom branch. No changes made.' >&2; exit 5;
+}
+/usr/bin/git -C "$tap" fetch origin main
+/usr/bin/git -C "$tap" merge-base --is-ancestor HEAD FETCH_HEAD || {
+    echo 'The TrackPointD tap has local commits. No merge attempted.' >&2; exit 5;
+}
+/usr/bin/git -C "$tap" merge --ff-only FETCH_HEAD
 available=$("$brew" info --json=v2 "$formula" | /usr/bin/plutil -extract formulae.0.versions.stable raw -o - -)
 if [ "$available" != "$expected" ]; then
     echo "Homebrew offers $available; requested release $expected is not ready. Check again later." >&2
