@@ -64,10 +64,9 @@ brew install hoyaaaa/trackpointd/trackpointd
 brew update && brew upgrade hoyaaaa/trackpointd/trackpointd
 ```
 
-Before the first stable formula is promoted, only an explicitly requested
-`brew install --HEAD hoyaaaa/trackpointd/trackpointd` is available **after this
-feature is merged into main**. HEAD builds are development builds, not stable
-GitHub Releases. Do not advertise a stable brew install before promotion.
+For development, explicitly request `brew install --HEAD hoyaaaa/trackpointd/trackpointd`.
+HEAD builds are development builds, not stable GitHub Releases. Regular installs
+use the latest promoted stable formula.
 
 ## Installation identity and limits
 
