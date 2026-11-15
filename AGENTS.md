@@ -75,15 +75,21 @@ signal or native Press-to-Select command; do not emulate it from X/Y movement.
 
 ## Build and verify
 
+Every feature addition or behavior change, including a bug fix, must include
+new or extended automated test code. Bug fixes need a regression test that fails
+before the fix and passes afterward. Existing passing CI without coverage of the
+changed behavior is insufficient. Do not weaken or skip tests to make CI pass.
+See `CONTRIBUTING.md` and `tests/README.md`.
+
+Run the full required suite before submitting or updating a PR:
+
 ```bash
-clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
-  -o /tmp/trackpointd trackpointd.m \
-  -framework Cocoa -framework ApplicationServices -framework CoreAudio \
-  -framework IOKit -lm
-/tmp/trackpointd --self-test
-bash -n install.sh
-bash -n uninstall.sh
+bash scripts/test.sh
 ```
+
+The latest `macOS tests` CI check must pass before any merge into main, including
+maintainer merges. Tests must isolate preferences/files and intercept real input,
+device writes, system commands, audio changes and permission prompts.
 
 The installer must build and verify a staged bundle before replacing the live
 app. Do not reset privacy permissions automatically.

@@ -241,6 +241,13 @@ Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
 middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
 before a report is used.
 
+## Contributing
+
+**Feature additions and behavior changes (including bug fixes) must include
+automated test code, and all tests must pass before merge.** Passing the existing
+suite without tests for the changed behavior is not sufficient. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for test, hardware-verification and PR requirements.
+
 ## Automated tests and merge requirements
 
 Run all non-interactive tests with `bash scripts/test.sh`. GitHub Actions runs
