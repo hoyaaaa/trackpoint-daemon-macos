@@ -4,14 +4,14 @@ static NSColor *trackpoint_red(void) {
 }
 static void draw_trackpoint_icon(NSRect bounds, NSColor *background, NSColor *dot) {
     CGFloat scale=MIN(bounds.size.width/18.0,bounds.size.height/16.0);
-    NSAffineTransform *transform=[NSAffineTransform transform];
-    [transform translateXBy:NSMidX(bounds)-9*scale yBy:NSMidY(bounds)-8*scale];
-    [transform scaleBy:scale];
-    [NSGraphicsContext saveGraphicsState];
-    [transform concat];
-    [background setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(1,2,16,12) xRadius:3 yRadius:3] fill];
-    [dot setFill];
-    [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(6.5,5.5,5,5)] fill];
-    [NSGraphicsContext restoreGraphicsState];
+    CGContextRef context=NSGraphicsContext.currentContext.CGContext;
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context,NSMidX(bounds)-9*scale,NSMidY(bounds)-8*scale);
+    CGContextScaleCTM(context,scale,scale);
+    CGPathRef body=CGPathCreateWithRoundedRect(CGRectMake(1,2,16,12),3,3,NULL);
+    CGContextSetFillColorWithColor(context,background.CGColor);
+    CGContextAddPath(context,body); CGContextFillPath(context); CGPathRelease(body);
+    CGContextSetFillColorWithColor(context,dot.CGColor);
+    CGContextFillEllipseInRect(context,CGRectMake(6.5,5.5,5,5));
+    CGContextRestoreGState(context);
 }
