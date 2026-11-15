@@ -23,7 +23,8 @@ static IOReturn set_report(IOHIDDeviceRef dev, IOHIDReportType type, CFIndex rid
     int pid = [((__bridge NSDictionary *)dev)[@kIOHIDProductIDKey] intValue];
     [reports addObject:@{@"pid":@(pid), @"type":@(type), @"id":@(rid),
                          @"bytes":[NSData dataWithBytes:bytes length:length]}];
-    return pid == failedPID ? kIOReturnError : kIOReturnSuccess;
+    return pid == failedPID || [((__bridge NSDictionary *)dev)[@"rejectConfig"] boolValue]
+        ? kIOReturnError : kIOReturnSuccess;
 }
 static void post(CGEventTapLocation tap, CGEventRef event) {
     assert(tap == kCGSessionEventTap);
@@ -314,16 +315,16 @@ static void test_devices_and_settings(void) {
     s_sensitivity=9; s_fnLock=YES;
     apply_hardware_settings();
     assert(reports.count==6 && usb->hardwareSensitivityApplied && ble->hardwareSensitivityApplied);
-    assert(!compact->hardwareSensitivityApplied && !s_hardwareSensitivity);
+    assert(!compact->hardwareSensitivityApplied);
     const uint8_t *bytes = [reports[0][@"bytes"] bytes];
     assert(bytes[1]==2 && bytes[2]==9);
     assert(!send_config_command(compact->device,2,5)); assert(reports.count==6);
     [s_tpDevices removeObject:compact]; [reports removeAllObjects];
-    apply_hardware_settings(); assert(s_hardwareSensitivity);
+    apply_hardware_settings(); assert(usb->hardwareSensitivityApplied && ble->hardwareSensitivityApplied);
     failedPID=TP_BLE_PID; apply_hardware_settings();
-    assert(usb->hardwareSensitivityApplied && !ble->hardwareSensitivityApplied && !s_hardwareSensitivity);
+    assert(usb->hardwareSensitivityApplied && !ble->hardwareSensitivityApplied);
     [reports removeAllObjects]; s_enabled=NO;
-    apply_hardware_settings(); assert(!s_hardwareSensitivity && reports.count==0);
+    apply_hardware_settings(); assert(reports.count==0);
 
     s_enabled=YES; s_swapEnabled=s_f18Enabled=YES;
     [s_tpDevices addObject:compact];
@@ -561,6 +562,57 @@ static void test_startup_preferences(void) {
     assert(!s_enabled && s_blockMiddle && [s_f12Text isEqual:@"saved text"]);
     assert([s_f12URL isEqual:@"https://example.com/saved"]);
 }
+static void test_pointer_sensitivity_display(void) {
+    clear();
+    QuietSettings *settings=[QuietSettings new];
+    void (*sync)(id,SEL)=(void (*)(id,SEL))class_getMethodImplementation(SettingsWindowController.class,@selector(syncState));
+    s_sensitivity=6;
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"Disconnected"]);
+    TPHIDDevice *pointer=make_device(TP_USB_PID);
+    NSDictionary *auxiliaryProperties=@{@kIOHIDVendorIDKey:@(LENOVO_VID),
+        @kIOHIDProductIDKey:@(TP_USB_PID), @"rejectConfig":@YES};
+    TPHIDDevice *keys=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)auxiliaryProperties];
+    TPHIDDevice *vendor=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)auxiliaryProperties];
+    [s_tpDevices addObjectsFromArray:@[pointer,keys,vendor]];
+    apply_hardware_settings();
+    assert(pointer->hardwareSensitivityApplied && !keys->hardwareSensitivityApplied && !vendor->hardwareSensitivityApplied);
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"move TrackPoint"]);
+    /* Real USB regression: other interfaces reject configuration, but do not move. */
+    value(pointer,kHIDPage_GenericDesktop,kHIDUsage_GD_X,1);
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"(hardware sensitivity)"]);
+    assert([settings.applyStatus.stringValue containsString:@"Level 6"]);
+    assert(![settings.applyStatus.stringValue containsString:@"fallback"]);
+    /* A genuine pointer setting failure must still be shown as fallback. */
+    pointer->hardwareSensitivityApplied=NO;
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"software fallback"]);
+    assert([settings.applyStatus.stringValue containsString:@"software fallback active"]);
+    pointer->hardwareSensitivityApplied=YES;
+    TPHIDDevice *compact=make_device(TP_COMPACT_PID);
+    [s_tpDevices addObject:compact];
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"(hardware sensitivity)"]);
+    value(compact,kHIDPage_GenericDesktop,kHIDUsage_GD_Y,1);
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"hardware + software"]);
+    assert([settings.applyStatus.stringValue containsString:@"per device"]);
+    [s_tpDevices removeObject:compact];
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"(hardware sensitivity)"]);
+    [pointer resetAfterWake];
+    sync(settings,@selector(syncState));
+    assert([settings.applyStatus.stringValue containsString:@"verify sensitivity"]);
+    value(pointer,kHIDPage_GenericDesktop,kHIDUsage_GD_X,1);
+    sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"(hardware sensitivity)"]);
+    s_enabled=NO; sync(settings,@selector(syncState));
+    assert([settings.keyboardStatus.stringValue containsString:@"Paused"]);
+    assert([settings.applyStatus.stringValue containsString:@"Paused"]);
+    [settings.window close];
+}
 static void test_preferences_and_editor(void) {
     clear();
     QuietSettings *settings=[QuietSettings new];
@@ -636,7 +688,7 @@ int main(void) {
         [NSApplication sharedApplication];
         g_app=[QuietApp new];
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
-        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_preferences_and_editor();
+        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_pointer_sensitivity_display(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];
         puts("runtime/device/action/preferences tests: ok (all external effects intercepted)");
     }
