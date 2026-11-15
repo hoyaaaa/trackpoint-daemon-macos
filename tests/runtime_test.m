@@ -133,12 +133,16 @@ static NSString *suite;
 @interface TestWorkspace : NSObject
 + (instancetype)sharedWorkspace;
 - (BOOL)openURL:(NSURL *)url;
+@property(readonly) NSRunningApplication *frontmostApplication;
+- (void)activateFileViewerSelectingURLs:(NSArray *)urls;
 - (NSNotificationCenter *)notificationCenter;
 @end
 @implementation TestWorkspace
 + (instancetype)sharedWorkspace { static TestWorkspace *w; if (!w) w=[self new]; return w; }
 - (BOOL)openURL:(NSURL *)url { assert(url); [urls addObject:url.absoluteString]; return YES; }
 - (NSNotificationCenter *)notificationCenter { return [NSNotificationCenter new]; }
+- (NSRunningApplication *)frontmostApplication { return nil; }
+- (void)activateFileViewerSelectingURLs:(NSArray *)files { [urls addObjectsFromArray:files]; }
 @end
 
 static NSArray<NSURL *> *selectedFiles;
@@ -728,10 +732,13 @@ static void test_preferences_and_editor(void) {
     }
     trusted=NO; s_accessibilityRequestAttempted=NO;
     [settings requestAccessibility:nil]; assert(s_accessibilityRequestAttempted);
+    assert(settings.permissionGuide.forAccessibility);
+    assert([urls.lastObject containsString:@"Privacy_Accessibility"]);
     [urls removeAllObjects]; [settings requestAccessibility:nil];
     assert([urls.lastObject containsString:@"Privacy_Accessibility"]);
     accessState=kIOHIDAccessTypeUnknown; [urls removeAllObjects];
-    [settings requestInputMonitoring:nil]; assert(!urls.count);
+    [settings requestInputMonitoring:nil]; assert([urls.lastObject containsString:@"Privacy_ListenEvent"]);
+    assert(!settings.permissionGuide.forAccessibility);
     accessState=kIOHIDAccessTypeDenied; [settings requestInputMonitoring:nil];
     assert([urls.lastObject containsString:@"Privacy_ListenEvent"]);
     trusted=YES; accessState=kIOHIDAccessTypeGranted;
@@ -740,9 +747,78 @@ static void test_preferences_and_editor(void) {
     s_enabled=YES; sync(settings,@selector(syncState)); assert(settings.slider.enabled && settings.blockMiddleCheck.enabled);
     [settings.window close];
 }
+@interface TestPermissionIcon : TPPermissionIcon
+@property (strong) NSArray<NSDraggingItem *> *capturedItems;
+@end
+@implementation TestPermissionIcon
+- (NSDraggingSession *)beginDraggingSessionWithItems:(NSArray<NSDraggingItem *> *)items
+    event:(NSEvent *)event source:(id<NSDraggingSource>)source {
+    assert(event && source==self); self.capturedItems=items; return nil;
+}
+@end
+static BOOL guideVisible;
+static BOOL test_guide_visible(id panel, SEL selector) { (void)panel; (void)selector; return guideVisible; }
+static void quiet_guide_front(id panel, SEL selector, id sender) {
+    (void)panel; (void)selector; (void)sender;
+}
+static void test_permission_guide(void) {
+    NSRect screen=NSMakeRect(0,0,1440,900);
+    NSSize size=NSMakeSize(280,260);
+    NSRect right=permission_guide_frame(NSMakeRect(100,200,700,600),screen,size);
+    assert(right.origin.x==812 && NSMaxY(right)==800);
+    NSRect left=permission_guide_frame(NSMakeRect(700,200,700,600),screen,size);
+    assert(left.origin.x==408);
+    NSRect clamped=permission_guide_frame(NSMakeRect(-100,-500,1500,1600),screen,size);
+    assert(NSContainsRect(screen,clamped));
+    NSRect secondary=NSMakeRect(-1280,-200,1280,900);
+    assert(NSContainsRect(secondary,permission_guide_frame(NSMakeRect(-1200,-100,900,700),secondary,size)));
+    TestPermissionIcon *icon=[[TestPermissionIcon alloc] initWithFrame:NSMakeRect(0,0,72,72)];
+    NSEvent *event=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:0 clickCount:1 pressure:1];
+    [icon mouseDown:event]; assert(!icon.capturedItems); // No invalid URL drag.
+    icon.applicationURL=[NSURL fileURLWithPath:@"/tmp/TrackPointD.app"];
+    icon.image=[[NSImage alloc] initWithSize:NSMakeSize(72,72)];
+    [icon mouseDown:event];
+    assert(icon.capturedItems.count==1);
+    assert([icon.capturedItems.firstObject.item isEqual:icon.applicationURL]);
+    assert(NSEqualRects(icon.capturedItems.firstObject.draggingFrame,icon.bounds));
+    TPPermissionGuide *guide=[TPPermissionGuide new];
+    // The test executable is not an app: never offer a wrong executable to TCC.
+    assert(!guide.applicationIcon.applicationURL);
+    assert(guide.level==NSFloatingWindowLevel && !guide.hidesOnDeactivate);
+    assert([guide.applicationIcon draggingSession:(NSDraggingSession *)[NSObject new] sourceOperationMaskForDraggingContext:NSDraggingContextOutsideApplication]==NSDragOperationCopy);
+    trusted=NO; accessState=kIOHIDAccessTypeDenied;
+    [guide showForAccessibility:YES];
+    assert([guide.instructions.stringValue containsString:@"Accessibility"]);
+    assert(!guide.permissionTimer);
+    guideVisible=YES;
+    [guide showForAccessibility:YES];
+    assert(guide.permissionTimer.valid);
+    NSTimer *previous=guide.permissionTimer;
+    [guide showForAccessibility:NO];
+    assert(!previous.valid && guide.permissionTimer.valid);
+    trusted=YES;
+    [guide updatePermissionGuide];
+    assert(guide.permissionTimer.valid); // Accessibility does not satisfy Input Monitoring.
+    accessState=kIOHIDAccessTypeGranted;
+    [guide updatePermissionGuide]; assert(!guide.permissionTimer);
+    accessState=kIOHIDAccessTypeDenied;
+    [guide showForAccessibility:YES]; assert(!guide.permissionTimer); // Already allowed.
+    trusted=NO;
+    [guide showForAccessibility:YES]; assert(guide.permissionTimer.valid);
+    [guide close]; assert(!guide.permissionTimer);
+    guideVisible=NO;
+    [guide showForAccessibility:NO];
+    assert([guide.instructions.stringValue containsString:@"Input Monitoring"]);
+    trusted=YES; accessState=kIOHIDAccessTypeGranted;
+    [guide updatePermissionGuide]; assert(!guide.permissionTimer && !guide.visible);
+}
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
+        class_addMethod(TPPermissionGuide.class,@selector(orderFront:),(IMP)quiet_guide_front,"v@:@");
+        class_addMethod(TPPermissionGuide.class,@selector(isVisible),(IMP)test_guide_visible,"B@:");
+        test_permission_guide();
         g_app=[QuietApp new];
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
         test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();

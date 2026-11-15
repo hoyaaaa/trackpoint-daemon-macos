@@ -83,8 +83,8 @@ copied; the keyboard graphic is drawn from a macOS system symbol.
 
 The second tab contains the two required macOS permissions and all macOS-only
 options. When access has not been requested, **Request Access…** invokes
-Apple's native permission API and registers TrackPointD. The macOS prompt can
-then open the matching System Settings pane; only the user can approve the
+Apple's native permission API and registers TrackPointD. The matching System
+Settings pane and a draggable app helper open; only the user can approve the
 final switch. After a denial or approval, the button becomes **Open Settings…**.
 
 | Setting | What it does | Origin |
@@ -215,7 +215,16 @@ The installer builds a separate app, runs its protocol self-test, signs and
 verifies it, and only then replaces the installed copy. A failed upgrade rolls
 back to the previous app.
 
-Grant both permissions:
+Grant both permissions. In **Settings → macOS Integration**, click the button
+beside each permission. A small helper window stays beside the macOS settings
+window: drag its TrackPointD icon into the permission list, then turn it on.
+The icon points to the running `.app`, including Homebrew's current version.
+Use **Show in Finder** or the settings pane's **+** button if dragging is unavailable.
+The helper closes when that permission is granted; you can also close it manually.
+Only you can approve access. The helper does not change TCC or prevent macOS from
+requiring approval again after an ad-hoc-signed upgrade.
+
+The two permission panes are:
 
 1. **System Settings → Privacy & Security → Accessibility → TrackPointD**
 2. **System Settings → Privacy & Security → Input Monitoring → TrackPointD**

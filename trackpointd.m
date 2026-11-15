@@ -449,8 +449,122 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
 /* ══════════════════════════════════════════════════════════════
    Settings Window
    ══════════════════════════════════════════════════════════════ */
+/* A file URL drag lets System Settings register the actual running bundle. */
+@interface TPPermissionIcon : NSImageView <NSDraggingSource>
+@property (strong) NSURL *applicationURL;
+@end
+@implementation TPPermissionIcon
+- (void)mouseDown:(NSEvent *)event {
+    if (!self.applicationURL) return;
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:self.applicationURL];
+    [item setDraggingFrame:self.bounds contents:self.image];
+    [self beginDraggingSessionWithItems:@[item] event:event source:self];
+}
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session
+    sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    (void)session; (void)context;
+    return NSDragOperationCopy;
+}
+@end
+
+static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size) {
+    CGFloat x = NSMaxX(settings) + 12;
+    if (x + size.width > NSMaxX(screen)) x = NSMinX(settings) - size.width - 12;
+    x = MAX(NSMinX(screen), MIN(x, NSMaxX(screen) - size.width));
+    CGFloat y = MAX(NSMinY(screen), MIN(NSMaxY(settings) - size.height,
+                                      NSMaxY(screen) - size.height));
+    return NSMakeRect(x, y, size.width, size.height);
+}
+
+@interface TPPermissionGuide : NSPanel
+@property BOOL forAccessibility;
+@property (strong) NSTimer *permissionTimer;
+@property (strong) NSTextField *instructions;
+@property (strong) TPPermissionIcon *applicationIcon;
+- (void)showForAccessibility:(BOOL)accessibility;
+- (void)updatePermissionGuide;
+@end
+@implementation TPPermissionGuide
+- (instancetype)init {
+    self = [super initWithContentRect:NSMakeRect(0,0,280,238)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    if (!self) return nil;
+    self.title = @"Allow TrackPointD";
+    self.releasedWhenClosed = NO;
+    self.level = NSFloatingWindowLevel;
+    self.hidesOnDeactivate = NO;
+    self.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    self.applicationIcon = [[TPPermissionIcon alloc] initWithFrame:NSMakeRect(104,140,72,72)];
+    NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
+    if ([bundleURL.pathExtension.lowercaseString isEqualToString:@"app"])
+        self.applicationIcon.applicationURL = bundleURL;
+    self.applicationIcon.image = NSApp.applicationIconImage;
+    self.applicationIcon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [self.applicationIcon setAccessibilityLabel:@"Drag TrackPointD to the permission list"];
+    [self.contentView addSubview:self.applicationIcon];
+    self.instructions = [NSTextField wrappingLabelWithString:@""];
+    self.instructions.frame = NSMakeRect(18,48,244,82);
+    self.instructions.alignment = NSTextAlignmentCenter;
+    [self.contentView addSubview:self.instructions];
+    NSButton *reveal = [NSButton buttonWithTitle:@"Show in Finder" target:self action:@selector(revealApplication:)];
+    reveal.frame = NSMakeRect(70,12,140,28);
+    [self.contentView addSubview:reveal];
+    return self;
+}
+- (void)revealApplication:(id)sender {
+    (void)sender;
+    if (self.applicationIcon.applicationURL)
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[self.applicationIcon.applicationURL]];
+}
+- (void)showForAccessibility:(BOOL)accessibility {
+    self.forAccessibility = accessibility;
+    self.instructions.stringValue = [NSString stringWithFormat:
+        @"Drag this app into the %@ list, then turn it on.\nIf dragging is unavailable, use + or Show in Finder.",
+        accessibility ? @"Accessibility" : @"Input Monitoring"];
+    [self.permissionTimer invalidate];
+    [self center];
+    [self orderFront:nil];
+    __weak TPPermissionGuide *weakSelf = self;
+    self.permissionTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        (void)timer; [weakSelf updatePermissionGuide];
+    }];
+    [self updatePermissionGuide];
+}
+- (void)updatePermissionGuide {
+    BOOL allowed = self.forAccessibility ? AXIsProcessTrusted() :
+        input_monitoring_access() == kIOHIDAccessTypeGranted;
+    if (allowed || !self.visible) { [self close]; return; }
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (![front.bundleIdentifier isEqualToString:@"com.apple.systempreferences"]) return;
+    /* Only window bounds are used: no window titles, screen capture or AX access. */
+    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    for (NSDictionary *window in windows) {
+        if ([window[(__bridge id)kCGWindowOwnerPID] intValue] != front.processIdentifier ||
+            [window[(__bridge id)kCGWindowLayer] intValue] != 0) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)
+                window[(__bridge id)kCGWindowBounds], &bounds)) continue;
+        NSRect frame = NSRectFromCGRect(bounds);
+        frame.origin.y = NSMaxY(NSScreen.screens.firstObject.frame) - CGRectGetMaxY(bounds);
+        for (NSScreen *screen in NSScreen.screens) {
+            if (!NSPointInRect(NSMakePoint(NSMidX(frame), NSMidY(frame)), screen.frame)) continue;
+            [self setFrame:permission_guide_frame(frame, screen.visibleFrame, self.frame.size) display:YES];
+            return;
+        }
+    }
+}
+- (void)close {
+    [self.permissionTimer invalidate];
+    self.permissionTimer = nil;
+    [super close];
+}
+@end
+
 @interface SettingsWindowController : NSWindowController <NSTextFieldDelegate,
     NSTableViewDataSource, NSTableViewDelegate>
+@property (strong) TPPermissionGuide *permissionGuide;
 @property (strong) NSTextField *keyboardStatus;
 @property (strong) NSTextField *accessStatus;
 @property (strong) NSTextField *inputStatus;
@@ -674,7 +788,7 @@ static SettingsWindowController *g_settings = nil;
     [permissionsBox addSubview:self.inputMonitoringBtn];
 
     NSTextField *permissionHelp = [NSTextField labelWithString:
-        @"Request Access registers TrackPointD; only you can approve it in macOS."];
+        @"Drag the app from the helper window into Settings, then allow it."];
     permissionHelp.font = [NSFont systemFontOfSize:10];
     permissionHelp.textColor = [NSColor secondaryLabelColor];
     permissionHelp.frame = NSMakeRect(14, 13, 422, 16);
@@ -1241,22 +1355,24 @@ static SettingsWindowController *g_settings = nil;
 
 - (void)requestAccessibility:(id)sender {
     (void)sender;
+    if (!self.permissionGuide) self.permissionGuide = [TPPermissionGuide new];
+    [self.permissionGuide showForAccessibility:YES];
     if (!AXIsProcessTrusted() && !s_accessibilityRequestAttempted) {
         s_accessibilityRequestAttempted = true;
         NSDictionary *options = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
         (void)AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
         [self syncState];
-        return;
     }
     open_privacy_settings(@"Privacy_Accessibility");
 }
 
 - (void)requestInputMonitoring:(id)sender {
     (void)sender;
+    if (!self.permissionGuide) self.permissionGuide = [TPPermissionGuide new];
+    [self.permissionGuide showForAccessibility:NO];
     if (input_monitoring_access() == kIOHIDAccessTypeUnknown) {
         (void)IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
         [self syncState];
-        return;
     }
     open_privacy_settings(@"Privacy_ListenEvent");
 }
