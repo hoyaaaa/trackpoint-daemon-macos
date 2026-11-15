@@ -16,6 +16,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 -o "$app/Contents/MacOS/trackpoin
 if [ -f "$source_dir/TrackPointD.icns" ]; then
     cp "$source_dir/TrackPointD.icns" "$app/Contents/Resources/TrackPointD.icns"
 fi
+cp "$source_dir/scripts/upgrade.sh" "$app/Contents/Resources/upgrade.sh"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

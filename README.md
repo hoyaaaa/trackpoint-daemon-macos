@@ -11,8 +11,14 @@ drivers or third-party dependencies.
 ## Versions and updates
 
 The menu's **Check for Updates…** compares the running version with GitHub's
-latest published stable Release. It opens release notes or copies the Homebrew
-upgrade command; it does not install updates or add background checks.
+latest published stable Release and shows its patch notes inside the app.
+For Homebrew installations, **Upgrade and Reopen** runs the existing local brew,
+shows progress, verifies the installed version/signature and reopens the app.
+TrackPointD enhancements pause during installation; preferences are preserved.
+An error shows details and restores the previous enabled/paused state. If a
+release has not reached the brew formula yet, installation waits for a later try.
+Source installations can use **Release Page** instead. Checks remain manual;
+release text is displayed as plain text and never executed.
 See [CHANGELOG.md](CHANGELOG.md) for patch notes and [RELEASING.md](RELEASING.md)
 for versioning, release publication and package promotion.
 

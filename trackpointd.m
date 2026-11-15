@@ -25,6 +25,7 @@
 #import <float.h>
 #import "version.h"
 #import "updates.h"
+#import "upgrade.h"
 #import "icon.h"
 
 /* ── Config ───────────────────────────────────────────────────── */
@@ -1404,6 +1405,8 @@ static void open_privacy_settings(NSString *pane) {
    ══════════════════════════════════════════════════════════════ */
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property BOOL checkingForUpdates;
+@property BOOL upgrading;
+- (void)upgradeToRelease:(NSDictionary *)release installation:(NSDictionary *)installation;
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSMenuItem   *connectionItem;
 @property (strong) NSMenuItem   *enabledItem;
@@ -1447,6 +1450,11 @@ static NSImage *status_icon(NSColor *dotColor) {
         selector:@selector(systemDidWake:) name:NSWorkspaceDidWakeNotification object:nil];
     if (input_monitoring_granted()) setup_hid();
     if (AXIsProcessTrusted()) try_create_event_tap();
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender;
+    return self.upgrading ? NSTerminateCancel : NSTerminateNow;
 }
 
 - (void)systemDidWake:(NSNotification *)notification {
@@ -1546,7 +1554,7 @@ static NSImage *status_icon(NSColor *dotColor) {
 
 - (void)checkForUpdates:(id)sender {
     (void)sender;
-    if (self.checkingForUpdates) return;
+    if (self.checkingForUpdates || self.upgrading) return;
     self.checkingForUpdates = YES;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
         [NSURL URLWithString:@"https://api.github.com/repos/hoyaaaa/trackpoint-daemon-macos/releases/latest"]
@@ -1573,26 +1581,52 @@ static NSImage *status_icon(NSColor *dotColor) {
             alert.messageText = failure ? @"Update Check" : update ?
                 [NSString stringWithFormat:@"TrackPointD %@ is available", update[@"version"]] : @"You’re up to date";
             alert.informativeText = failure ?: (update ?
-                [NSString stringWithFormat:@"Installed: %@\n\nTo upgrade with Homebrew:\nbrew update && brew upgrade hoyaaaa/trackpointd/trackpointd\n\nQuit TrackPointD before running this command, then reopen it. Source installations can use the new release’s installer. Privacy permissions may need approval again.", @TRACKPOINTD_VERSION] :
+                [NSString stringWithFormat:@"Installed: %@\nInstall with Homebrew and reopen automatically. Privacy permissions may need approval again.", @TRACKPOINTD_VERSION] :
                 [NSString stringWithFormat:@"TrackPointD %@ is installed. No newer stable release is available.", @TRACKPOINTD_VERSION]);
+            if (!failure) {
+                id payload=data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+                NSString *notes=[payload isKindOfClass:NSDictionary.class] && [payload[@"body"] isKindOfClass:NSString.class] ? payload[@"body"] : @"";
+                alert.accessoryView=release_notes_view(notes);
+            }
             if (update) {
-                [alert addButtonWithTitle:@"Release Notes"];
-                [alert addButtonWithTitle:@"Copy Upgrade Command"];
+                NSDictionary *installation=homebrew_installation(NSBundle.mainBundle.bundlePath);
+                NSButton *upgrade=[alert addButtonWithTitle:@"Upgrade and Reopen"];
+                upgrade.enabled=installation && [NSFileManager.defaultManager isExecutableFileAtPath:installation[@"brew"]];
+                if (!upgrade.enabled) alert.informativeText=@"This copy is not a supported Homebrew installation. Use the release page to install it. Release notes are shown below.";
+                [alert addButtonWithTitle:@"Release Page"];
                 [alert addButtonWithTitle:@"Later"];
                 NSModalResponse choice = [alert runModal];
-                if (choice == NSAlertFirstButtonReturn)
+                if (choice == NSAlertFirstButtonReturn && upgrade.enabled)
+                    [self upgradeToRelease:update installation:installation];
+                else if (choice == NSAlertSecondButtonReturn)
                     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:update[@"url"]]];
-                else if (choice == NSAlertSecondButtonReturn) {
-                    [[NSPasteboard generalPasteboard] clearContents];
-                    [[NSPasteboard generalPasteboard] setString:@"brew update && brew upgrade hoyaaaa/trackpointd/trackpointd"
-                        forType:NSPasteboardTypeString];
-                }
             } else {
                 [alert addButtonWithTitle:@"OK"];
                 [alert runModal];
             }
         });
     }] resume];
+}
+
+- (void)upgradeToRelease:(NSDictionary *)release installation:(NSDictionary *)installation {
+    if (self.upgrading || !installation || !version_parts(release[@"version"])) return;
+    self.upgrading=YES;
+    BOOL wasEnabled=s_enabled;
+    s_enabled=false; // Do not persist this temporary pause.
+    reset_gesture_state(); reset_compatibility_middle();
+    TPUpgradeController *controller=[TPUpgradeController new];
+    NSString *failure=nil;
+    BOOL installed=[controller runForInstallation:installation version:release[@"version"] error:&failure];
+    BOOL restarting=installed && [controller relaunchForInstallation:installation error:&failure];
+    self.upgrading=NO;
+    if (restarting) { [NSApp terminate:nil]; return; }
+    s_enabled=wasEnabled;
+    [self refresh];
+    NSAlert *alert=[NSAlert new];
+    alert.messageText=installed ? @"Update installed — reopen TrackPointD" : @"Could not upgrade TrackPointD";
+    alert.informativeText=installed ? @"Please reopen TrackPointD manually. Your settings are preserved." : @"The upgrade did not complete. Your settings are preserved. Details are shown below.";
+    alert.accessoryView=release_notes_view(failure ?: @"No further details available.");
+    [alert addButtonWithTitle:@"OK"]; [alert runModal];
 }
 
 - (void)refresh {

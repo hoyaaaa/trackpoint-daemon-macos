@@ -1,5 +1,6 @@
-#import <Foundation/Foundation.h>
+#import <Cocoa/Cocoa.h>
 #import "../updates.h"
+#import "../upgrade.h"
 static NSDictionary *release(NSString *tag) {
     return @{@"tag_name":tag,@"draft":@NO,@"prerelease":@NO,@"body":@"Changes",@"html_url":@"https://untrusted.example/"};
 }
@@ -8,6 +9,10 @@ int main(void) {
         for (NSString *invalid in @[@"",@"2.3",@"2.3.0-beta",@"v2.3.0",@"02.3.0",@"2.3.0\n",@"-1.2.3",@"9999999999.0.0"])
             assert(!version_parts(invalid));
         assert(!version_parts((id)@1));
+        assert([homebrew_installation(@"/opt/homebrew/Cellar/trackpointd/9.0.0/TrackPointD.app")[@"prefix"] isEqual:@"/opt/homebrew"]);
+        assert([homebrew_installation(@"/usr/local/Cellar/trackpointd/9.0.0/TrackPointD.app")[@"brew"] isEqual:@"/usr/local/bin/brew"]);
+        for (NSString *path in @[@"/Applications/TrackPointD.app",@"/opt/homebrew/Cellar/other/9.0.0/TrackPointD.app",@"/opt/homebrew/Cellar/trackpointd/9.0.0/Other.app",@"/opt/homebrew/Cellar/trackpointd/9.0.0/TrackPointD.app/Extra",@"/opt/homebrew/Cellar/trackpointd/HEAD/TrackPointD.app"])
+            assert(!homebrew_installation(path));
         NSString *error=nil;
         NSDictionary *update=available_release(release(@"v2.10.0"),@"2.9.9",&error);
         assert(update && !error);

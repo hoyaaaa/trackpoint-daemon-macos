@@ -4,6 +4,21 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.5.0 — 2026-11-15
+
+### Added
+- Show the latest GitHub Release patch notes inside the update dialog, including
+  when the installed app is already up to date.
+- Homebrew-installed apps can use Upgrade and Reopen directly, with a native
+  progress/log window. Check formula availability and installed signature,
+  version and self-test before restarting through the stable Homebrew path.
+- Pause enhancements only for the duration of installation without saving that
+  pause. Show errors and restore the enabled/paused state if an upgrade fails.
+
+### Changed
+- Replace Copy Upgrade Command with Upgrade and Reopen. Source installations
+  retain the canonical release-page option; no new dependencies are required.
+
 ## 2.4.2 — 2026-11-15
 
 ### Fixed

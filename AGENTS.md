@@ -6,7 +6,8 @@ Objective-C menu bar app for the ThinkPad TrackPoint Keyboard II.
 Keep it dependency-free and compatible with macOS 12+.
 Version metadata lives in `version.h`; follow `RELEASING.md` for changelog, tags
 and Homebrew promotion. Updates use only published stable GitHub Releases and
-never download or execute code from the app.
+run only the existing local Homebrew after an explicit Upgrade button. Never
+execute commands, URLs or installers supplied by release metadata.
 
 Supported hardware (exact matching only):
 

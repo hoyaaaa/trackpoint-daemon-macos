@@ -69,6 +69,7 @@ def scenario(mode, failure='', existing=True):
             (source / name).write_text(text)
         (source / 'scripts').mkdir()
         shutil.copyfile(ROOT / 'scripts/build-app.sh', source / 'scripts/build-app.sh')
+        shutil.copyfile(ROOT / 'scripts/upgrade.sh', source / 'scripts/upgrade.sh')
         shutil.copyfile(ROOT / 'version.h', source / 'version.h')
         log = base / 'commands.jsonl'
         env = dict(os.environ, TEST_HOME=str(home), TEST_LOG=str(log), FAIL_STEP=failure,
