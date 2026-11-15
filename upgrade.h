@@ -1,0 +1,135 @@
+/* No downloaded installers: an explicit button runs the existing local Homebrew. */
+static NSDictionary *homebrew_installation(NSString *bundlePath) {
+    NSString *path = bundlePath.stringByResolvingSymlinksInPath;
+    for (NSString *prefix in @[@"/opt/homebrew", @"/usr/local"]) {
+        NSString *root = [prefix stringByAppendingString:@"/Cellar/trackpointd/"];
+        if (![path hasPrefix:root]) continue;
+        NSArray *parts = [[path substringFromIndex:root.length] pathComponents];
+        if (parts.count != 2 || !version_parts(parts[0]) || ![parts[1] isEqual:@"TrackPointD.app"]) return nil;
+        return @{@"prefix":prefix, @"brew":[prefix stringByAppendingString:@"/bin/brew"]};
+    }
+    return nil;
+}
+static NSScrollView *release_notes_view(NSString *notes) {
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,480,240)];
+    scroll.hasVerticalScroller = YES;
+    scroll.borderType = NSBezelBorder;
+    NSTextView *text = [[NSTextView alloc] initWithFrame:scroll.bounds];
+    text.editable = NO;
+    text.font = [NSFont systemFontOfSize:12];
+    text.textContainerInset = NSMakeSize(10,10);
+    text.autoresizingMask = NSViewWidthSizable;
+    text.textContainer.widthTracksTextView = YES;
+    text.minSize = NSMakeSize(0,scroll.bounds.size.height);
+    text.maxSize = NSMakeSize(CGFLOAT_MAX,CGFLOAT_MAX);
+    text.textContainer.containerSize = NSMakeSize(scroll.bounds.size.width,CGFLOAT_MAX);
+    text.verticallyResizable = YES;
+    text.horizontallyResizable = NO;
+    text.string = notes.length ? notes : @"No release notes were provided.";
+    [text setAccessibilityLabel:@"Release notes"];
+    scroll.documentView = text;
+    return scroll;
+}
+
+@interface TPUpgradeController : NSWindowController
+@property (strong) NSTextView *output;
+@property (strong) NSTask *task;
+@property (strong) NSTimer *logTimer;
+@property (strong) NSString *directory;
+@property (strong) NSString *script;
+@property (strong) NSString *logPath;
+- (BOOL)runForInstallation:(NSDictionary *)installation version:(NSString *)version error:(NSString **)error;
+- (BOOL)relaunchForInstallation:(NSDictionary *)installation error:(NSString **)error;
+@end
+@implementation TPUpgradeController
+- (void)refreshLog {
+    NSFileHandle *file = [NSFileHandle fileHandleForReadingAtPath:self.logPath];
+    unsigned long long length = [file seekToEndOfFile];
+    [file seekToFileOffset:length > 65536 ? length - 65536 : 0];
+    NSData *data = [file readDataOfLength:65536];
+    [file closeFile];
+    self.output.string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"Updating…";
+    [self.output scrollRangeToVisible:NSMakeRange(self.output.string.length,0)];
+}
+- (BOOL)runForInstallation:(NSDictionary *)installation version:(NSString *)version error:(NSString **)error {
+    if (!version_parts(version)) { if (error) *error=@"Invalid version."; return NO; }
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSString *resource = [NSBundle.mainBundle pathForResource:@"upgrade" ofType:@"sh"];
+    self.directory = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [@"trackpointd-upgrade." stringByAppendingString:NSUUID.UUID.UUIDString]];
+    self.script = [self.directory stringByAppendingPathComponent:@"upgrade.sh"];
+    self.logPath = [self.directory stringByAppendingPathComponent:@"upgrade.log"];
+    NSError *failure = nil;
+    if (!resource || ![files isExecutableFileAtPath:installation[@"brew"]] ||
+        ![files createDirectoryAtPath:self.directory withIntermediateDirectories:NO
+            attributes:@{NSFilePosixPermissions:@0700} error:&failure] ||
+        ![files copyItemAtPath:resource toPath:self.script error:&failure] ||
+        ![files createFileAtPath:self.logPath contents:nil attributes:@{NSFilePosixPermissions:@0600}]) {
+        if (error) *error=failure.localizedDescription ?: @"Homebrew or the bundled updater is unavailable.";
+        [files removeItemAtPath:self.directory error:NULL];
+        return NO;
+    }
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,360)
+        styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+    window.title = @"Updating TrackPointD";
+    window.releasedWhenClosed = NO;
+    self.window = window;
+    NSTextField *label = [NSTextField labelWithString:@"Installing with Homebrew. TrackPointD enhancements are paused."];
+    label.frame = NSMakeRect(18,320,524,22);
+    [window.contentView addSubview:label];
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(18,292,524,16)];
+    spinner.style = NSProgressIndicatorStyleBar;
+    spinner.indeterminate = YES;
+    [spinner startAnimation:nil];
+    [window.contentView addSubview:spinner];
+    NSScrollView *scroll = release_notes_view(@"Starting…");
+    scroll.frame = NSMakeRect(18,18,524,260);
+    self.output = (NSTextView *)scroll.documentView;
+    [window.contentView addSubview:scroll];
+    NSFileHandle *log = [NSFileHandle fileHandleForWritingAtPath:self.logPath];
+    self.task = [NSTask new];
+    self.task.launchPath = @"/bin/bash";
+    self.task.arguments = @[@"--",self.script,@"upgrade",installation[@"brew"],installation[@"prefix"],version];
+    self.task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+    self.task.standardOutput = log;
+    self.task.standardError = log;
+    __weak TPUpgradeController *weakSelf = self;
+    self.logTimer = [NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        TPUpgradeController *owner=weakSelf;
+        [owner refreshLog];
+        if (!owner.task.running) { [timer invalidate]; [NSApp stopModal]; }
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.logTimer forMode:NSRunLoopCommonModes];
+    if (![self.task launchAndReturnError:&failure]) {
+        [self.logTimer invalidate]; [log closeFile];
+        if (error) *error=failure.localizedDescription;
+        [files removeItemAtPath:self.directory error:NULL];
+        return NO;
+    }
+    [window center];
+    [NSApp activateIgnoringOtherApps:YES];
+    [NSApp runModalForWindow:window];
+    [self.logTimer invalidate];
+    [log closeFile];
+    [self refreshLog];
+    [window orderOut:nil];
+    BOOL success=self.task.terminationStatus==0;
+    if (!success) {
+        if (error) *error=self.output.string.length ? self.output.string : @"Homebrew update failed.";
+        [files removeItemAtPath:self.directory error:NULL];
+    }
+    return success;
+}
+- (BOOL)relaunchForInstallation:(NSDictionary *)installation error:(NSString **)error {
+    NSTask *restart = [NSTask new];
+    restart.launchPath = @"/bin/bash";
+    restart.arguments = @[@"--",self.script,@"relaunch",[NSString stringWithFormat:@"%d",getpid()],installation[@"prefix"]];
+    restart.standardInput = [NSFileHandle fileHandleWithNullDevice];
+    restart.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    restart.standardError = [NSFileHandle fileHandleWithNullDevice];
+    NSError *failure=nil;
+    BOOL launched=[restart launchAndReturnError:&failure];
+    if (!launched && error) *error=failure.localizedDescription;
+    return launched;
+}
+@end

@@ -121,6 +121,9 @@ static NSString *suite;
 @property(strong) id standardOutput;
 @property(strong) id standardError;
 @property int terminationStatus;
+@property BOOL running;
+@property(strong) id standardInput;
+- (BOOL)launchAndReturnError:(NSError **)error;
 - (void)launch;
 - (void)waitUntilExit;
 @end
@@ -130,6 +133,7 @@ static NSString *suite;
     [tasks addObject:@{@"path":self.launchPath,@"args":self.arguments}];
 }
 - (void)waitUntilExit {}
+- (BOOL)launchAndReturnError:(NSError **)error { (void)error; assert(!"Unexpected real upgrade task in runtime tests"); return NO; }
 @end
 @interface TestWorkspace : NSObject
 + (instancetype)sharedWorkspace;
@@ -151,6 +155,7 @@ static NSModalResponse panelResponse=NSModalResponseOK;
 static int limitWarnings;
 static NSModalResponse updateChoice=NSAlertThirdButtonReturn;
 static NSString *alertTitle, *alertText, *copiedCommand;
+static NSView *alertAccessory;
 static int downloadCount;
 static void (^pendingDownload)(NSData *,NSURLResponse *,NSError *);
 @interface TestOpenPanel : NSObject
@@ -169,13 +174,14 @@ static void (^pendingDownload)(NSData *,NSURLResponse *,NSError *);
 @end
 @interface TestAlert : NSObject
 @property(copy) NSString *messageText, *informativeText;
+@property(strong) NSView *accessoryView;
 - (NSButton *)addButtonWithTitle:(NSString *)title;
 - (NSModalResponse)runModal;
 - (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSModalResponse))handler;
 @end
 @implementation TestAlert
-- (NSButton *)addButtonWithTitle:(NSString *)title { (void)title; return nil; }
-- (NSModalResponse)runModal { alertTitle=self.messageText; alertText=self.informativeText; return updateChoice; }
+- (NSButton *)addButtonWithTitle:(NSString *)title { return [NSButton buttonWithTitle:title target:nil action:NULL]; }
+- (NSModalResponse)runModal { alertTitle=self.messageText; alertText=self.informativeText; alertAccessory=self.accessoryView; return updateChoice; }
 - (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSModalResponse))handler {
     (void)window; (void)handler; limitWarnings++;
 }
@@ -554,6 +560,11 @@ static void finish_update(NSInteger status,NSData *data,NSError *error) {
 }
 static void test_update_requests(void) {
     clear();
+    g_app.upgrading=YES;
+    int before=downloadCount;
+    [g_app checkForUpdates:nil]; assert(downloadCount==before);
+    assert([g_app applicationShouldTerminate:NSApp]==NSTerminateCancel);
+    g_app.upgrading=NO; assert([g_app applicationShouldTerminate:NSApp]==NSTerminateNow);
     [g_app checkForUpdates:nil]; int count=downloadCount;
     [g_app checkForUpdates:nil]; assert(downloadCount==count && g_app.checkingForUpdates);
     finish_update(404,nil,nil); assert([alertText containsString:@"No stable release"]);
@@ -568,9 +579,12 @@ static void test_update_requests(void) {
     NSDictionary *payload=@{@"tag_name":@"v99.0.0",@"draft":@NO,@"prerelease":@NO,@"body":@"notes"};
     NSData *data=[NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
     updateChoice=NSAlertFirstButtonReturn; [g_app checkForUpdates:nil]; finish_update(200,data,nil);
-    assert([urls.lastObject hasSuffix:@"/releases/tag/v99.0.0"]);
+    // The test executable is not a Homebrew app: upgrade is disabled.
+    assert(!g_app.upgrading);
+    assert([((NSTextView *)((NSScrollView *)alertAccessory).documentView).string isEqual:@"notes"]);
     updateChoice=NSAlertSecondButtonReturn; [g_app checkForUpdates:nil]; finish_update(200,data,nil);
-    assert([copiedCommand isEqual:@"brew update && brew upgrade hoyaaaa/trackpointd/trackpointd"]);
+    assert([urls.lastObject hasSuffix:@"/releases/tag/v99.0.0"]);
+    assert(!copiedCommand);
     updateChoice=NSAlertThirdButtonReturn;
     payload=@{@"tag_name":@"v0.0.0",@"draft":@NO,@"prerelease":@NO};
     data=[NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
@@ -781,6 +795,60 @@ static void test_preferences_and_editor(void) {
     assert(event && source==self); self.capturedItems=items; return nil;
 }
 @end
+static BOOL upgradeSucceeds, restartSucceeds;
+static int upgradeCalls, restartCalls, terminateCalls;
+@interface QuietUpgradeController : TPUpgradeController
+@end
+@implementation QuietUpgradeController
+- (BOOL)runForInstallation:(NSDictionary *)installation version:(NSString *)version error:(NSString **)error {
+    assert(!s_enabled && [version isEqual:@"99.0.0"] && installation);
+    upgradeCalls++;
+    if (!upgradeSucceeds && error) *error=@"simulated brew failure";
+    return upgradeSucceeds;
+}
+- (BOOL)relaunchForInstallation:(NSDictionary *)installation error:(NSString **)error {
+    assert(installation); restartCalls++;
+    if (!restartSucceeds && error) *error=@"simulated restart failure";
+    return restartSucceeds;
+}
+@end
+static id quiet_upgrade_new(id object, SEL selector) __attribute__((ns_returns_retained));
+static id quiet_upgrade_new(id object, SEL selector) {
+    (void)object; (void)selector; return [[QuietUpgradeController alloc] init];
+}
+static void quiet_terminate(id object, SEL selector, id sender) {
+    (void)object; (void)selector; (void)sender; terminateCalls++;
+}
+static void test_upgrade_state(void) {
+    class_addMethod(object_getClass(TPUpgradeController.class),@selector(new),(IMP)quiet_upgrade_new,"@@:");
+    Method terminate=class_getInstanceMethod(NSApplication.class,@selector(terminate:));
+    IMP original=method_setImplementation(terminate,(IMP)quiet_terminate);
+    NSDictionary *install=@{@"prefix":@"/opt/homebrew",@"brew":@"/opt/homebrew/bin/brew"};
+    NSDictionary *release=@{@"version":@"99.0.0"};
+    NSDictionary *prefs=[[TestDefaults standardUserDefaults].dictionaryRepresentation copy];
+    for (NSNumber *enabled in @[@NO,@YES]) {
+        s_enabled=enabled.boolValue; upgradeSucceeds=NO; restartSucceeds=NO;
+        int count=upgradeCalls;
+        [g_app upgradeToRelease:release installation:install];
+        assert(upgradeCalls==count+1 && s_enabled==enabled.boolValue && !g_app.upgrading);
+        assert(!terminateCalls && [alertTitle isEqual:@"Could not upgrade TrackPointD"]);
+    }
+    s_enabled=YES; upgradeSucceeds=YES; restartSucceeds=NO;
+    [g_app upgradeToRelease:release installation:install];
+    assert(s_enabled && !terminateCalls && restartCalls==1 && [alertTitle containsString:@"reopen"]);
+    upgradeSucceeds=YES; restartSucceeds=YES;
+    [g_app upgradeToRelease:release installation:install];
+    assert(!s_enabled && terminateCalls==1 && !g_app.upgrading);
+    s_enabled=YES; int count=upgradeCalls;
+    g_app.upgrading=YES;
+    [g_app upgradeToRelease:release installation:install]; assert(upgradeCalls==count && s_enabled);
+    g_app.upgrading=NO;
+    [g_app upgradeToRelease:release installation:nil];
+    [g_app upgradeToRelease:@{@"version":@"bad"} installation:install];
+    assert(upgradeCalls==count && s_enabled);
+    assert([prefs isEqual:[TestDefaults standardUserDefaults].dictionaryRepresentation]);
+    method_setImplementation(terminate,original);
+}
 static BOOL test_guide_visible(id panel, SEL selector) { (void)panel; (void)selector; return guideVisible; }
 static void quiet_guide_front(id panel, SEL selector, id sender) {
     (void)panel; (void)selector; (void)sender;
@@ -862,7 +930,7 @@ int main(void) {
         test_permission_guide();
         g_app=[QuietApp new];
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
-        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();
+        test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_upgrade_state(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];
         puts("runtime/device/action/preferences tests: ok (all external effects intercepted)");
     }

@@ -80,6 +80,13 @@ Ad-hoc upgrades may require Accessibility/Input Monitoring approval again.
 Developer ID distribution and notarization require a separate signing setup;
 this release pipeline deliberately distributes source, not a publicly signed app.
 
-The app's update check is user-triggered, uses GitHub's latest published stable
-release endpoint with a timeout, and never downloads or executes an installer.
-It opens canonical release notes or copies the Homebrew upgrade command.
+The app's update check is user-triggered and uses GitHub's latest published
+stable release endpoint with a timeout. Patch notes appear as plain text inside
+the app. An explicit **Upgrade and Reopen** button is available only for standard
+Homebrew installations under `/opt/homebrew` or `/usr/local`. It runs fixed local
+brew update/upgrade operations, requires the formula version to match the release,
+verifies the resulting bundle/version/self-test, and reopens after the old process
+exits. The native progress window temporarily pauses enhancements without saving
+that pause. Failures restore the old enabled/paused state and show bounded logs.
+Release metadata never supplies shell commands or installer URLs. Source installs
+use the canonical release page instead.

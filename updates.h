@@ -1,4 +1,4 @@
-/* GitHub stable releases are the only update authority. No downloads are executed. */
+/* GitHub stable releases are the only update authority. Release metadata never supplies executable commands. */
 static NSArray<NSNumber *> *version_parts(NSString *value) {
     if (![value isKindOfClass:NSString.class]) return nil;
     NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:
