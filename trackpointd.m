@@ -31,6 +31,7 @@
 #define LENOVO_VID              0x17EF
 #define TP_USB_PID              0x60EE
 #define TP_BLE_PID              0x60E1
+#define TP_COMPACT_PID          0x6048  /* ThinkPad Compact Bluetooth Keyboard with TrackPoint */
 /* ─────────────────────────────────────────────────────────────── */
 
 #define HID_LEFT_OPTION   "0x7000000E2"
@@ -200,7 +201,7 @@ static int device_number(IOHIDDeviceRef dev, CFStringRef key) {
 static bool is_trackpoint_keyboard_ii(IOHIDDeviceRef dev) {
     int vid = device_number(dev, CFSTR(kIOHIDVendorIDKey));
     int pid = device_number(dev, CFSTR(kIOHIDProductIDKey));
-    return vid == LENOVO_VID && (pid == TP_USB_PID || pid == TP_BLE_PID);
+    return vid == LENOVO_VID && (pid == TP_USB_PID || pid == TP_BLE_PID || pid == TP_COMPACT_PID);
 }
 
 static bool send_config_command(IOHIDDeviceRef dev, uint8_t command, uint8_t value) {
@@ -1358,8 +1359,8 @@ static NSImage *status_icon(NSColor *dotColor) {
                                     [NSColor colorWithWhite:0.35 alpha:1.0];
     NSString *status = !s_enabled ? @"TrackPointD paused — basic pointer only" :
                        needsAttention ? @"TrackPointD needs attention" :
-                       connected ? @"TrackPoint Keyboard II connected" :
-                                   @"TrackPoint Keyboard II disconnected";
+                       connected ? @"ThinkPad TrackPoint keyboard connected" :
+                                   @"ThinkPad TrackPoint keyboard disconnected";
     self.statusItem.button.title = @"";
     self.statusItem.button.image = status_icon(dotColor);
     self.statusItem.button.toolTip = status;
@@ -1468,6 +1469,7 @@ static void apply_key_remap(void) {
         [products addObject:@(device_number(ctx->device, CFSTR(kIOHIDProductIDKey)))];
 
     for (NSNumber *product in products) {
+        if (product.intValue == TP_COMPACT_PID) continue; /* keep this keyboard's keys as-is */
         NSString *match = [NSString stringWithFormat:
             @"{\"VendorID\":%d,\"ProductID\":%d}", LENOVO_VID, product.intValue];
         NSTask *task = [NSTask new];
@@ -1977,6 +1979,7 @@ static void setup_hid(void) {
     NSArray *matches = @[
         @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_USB_PID)},
         @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_BLE_PID)},
+        @{@kIOHIDVendorIDKey: @(LENOVO_VID), @kIOHIDProductIDKey: @(TP_COMPACT_PID)},
     ];
     IOHIDManagerSetDeviceMatchingMultiple(s_hidManager, (__bridge CFArrayRef)matches);
     NSArray *inputMatches = @[
