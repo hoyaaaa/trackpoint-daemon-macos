@@ -1,9 +1,9 @@
 class Trackpointd < Formula
   desc "Menu bar companion for ThinkPad TrackPoint keyboards"
   homepage "https://github.com/hoyaaaa/trackpoint-daemon-macos"
-  url "https://github.com/hoyaaaa/trackpoint-daemon-macos/releases/download/v2.4.2/trackpointd-2.4.2.tar.gz"
-  sha256 "0376ff754c36c04ea63c7b4c8234f1d95f496379bc165d638d09f86f1e0fb055"
-  version "2.4.2"
+  url "https://github.com/hoyaaaa/trackpoint-daemon-macos/releases/download/v2.5.0/trackpointd-2.5.0.tar.gz"
+  sha256 "da4494667e12c38b0e97dcc187a6f20047d73b99e884006212edf22510978739"
+  version "2.5.0"
   head "https://github.com/hoyaaaa/trackpoint-daemon-macos.git", branch: "main"
   license "MIT"
   depends_on macos: :monterey
