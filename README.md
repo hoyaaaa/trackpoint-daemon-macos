@@ -262,10 +262,12 @@ Physical HID delivery and firmware behavior, actual OS permission approval,
 Login Item registration, real app/URL launching and input delivery, and visual/
 accessibility usability still require manual integration or hardware testing.
 
-The `macOS tests` check must pass before merging into main. Code ownership is
-assigned to `@hoyaaaa` for all files; main requires one code-owner approval and
-dismisses approvals after new commits. GitHub does not let a PR author approve
-their own PR, including PRs authored through their account's automation.
+The `macOS tests` check must pass and the branch must be up to date before
+anyone can merge into main; this test rule has no bypass. All files are owned by
+`@hoyaaaa`, and other contributors need one code-owner approval. The separate
+review rule allows only `@hoyaaaa` to bypass the review requirement when merging
+a PR, including their own PRs. This does not bypass tests or permit direct pushes,
+force pushes or main deletion. New commits dismiss prior review approvals.
 
 ## Build check
 
