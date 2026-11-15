@@ -12,4 +12,6 @@ for test_file in tests/*_test.m; do
     clang "${flags[@]}" -o "$build_dir/$test_name" "$test_file" "${frameworks[@]}"
     "$build_dir/$test_name"
 done
+python3 tests/installer_test.py
 bash -n install.sh uninstall.sh scripts/test.sh
+TRACKPOINTD_SIGN_IDENTITY=- bash install.sh --check

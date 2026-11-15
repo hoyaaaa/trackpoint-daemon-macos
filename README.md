@@ -246,15 +246,21 @@ before a report is used.
 Run all non-interactive tests with `bash scripts/test.sh`. GitHub Actions runs
 this command on macOS for pull requests into main and pushes to main.
 
-Coverage includes configuration report construction, report decoding and malformed
-input rejection, F12 URL validation, sensitivity calculations and mixed-device
-origin state, gesture/wake resets, and middle-click/compatibility-scroll behavior.
-Tests intercept generated mouse events; they do not send input to macOS.
+Coverage includes protocol parsing, device filtering and lifecycle, hardware-setting
+requests/failure fallback, key-remap combinations, USB/BLE scrolling and duplicate
+suppression, pointer scaling, middle-click behavior, event-tap recovery, F12 actions,
+hotkeys, microphone-mute failure paths, isolated preference persistence/startup
+validation, settings/editor behavior, and installer upgrade/rollback/uninstall.
+See [the test coverage matrix](tests/README.md) for boundaries and test files.
 
-These tests do **not** verify physical HID delivery, actual hardware settings,
-Bluetooth/USB reconnects, key remapping, F12 action execution, system hotkeys,
-permissions, settings persistence/UI, or installer rollback. Those still need
-integration or physical-device verification, especially on Compact.
+Runtime tests intercept device APIs, processes, URLs, audio changes and generated
+input. Preferences use a fresh test-only suite. Installer tests use redirected
+copies and intercepted commands in a temporary filesystem; the real installer
+also runs in `--check` mode with ad-hoc signing, without installing anything.
+
+Physical HID delivery and firmware behavior, actual OS permission approval,
+Login Item registration, real app/URL launching and input delivery, and visual/
+accessibility usability still require manual integration or hardware testing.
 
 The `macOS tests` check must pass before merging into main. Code ownership is
 assigned to `@hoyaaaa` for all files; main requires one code-owner approval and

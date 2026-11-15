@@ -1861,11 +1861,13 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
             kCGScrollWheelEventFixedPtDeltaAxis1,
             kCGScrollWheelEventPointDeltaAxis1,
         };
-        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-            int64_t value = CGEventGetIntegerValueField(event, fields[i]);
+        /* CGEvent setters can update related scroll fields. Snapshot before writing. */
+        int64_t values[sizeof(fields) / sizeof(fields[0])];
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+            values[i] = CGEventGetIntegerValueField(event, fields[i]);
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
             CGEventSetIntegerValueField(event, fields[i],
-                                        scaled_scroll_delta(value, factor));
-        }
+                                        scaled_scroll_delta(values[i], factor));
         return event;
     }
 
@@ -2157,49 +2159,53 @@ static int run_self_test(void) {
     return 0;
 }
 
+static void load_preferences(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud registerDefaults:@{
+        PREF_SENSITIVITY: @(TP_SENSITIVITY_DEFAULT),
+        PREF_F18: @YES,
+        PREF_SWAP: @YES,
+        PREF_SCROLL_SPEED: @(SCROLL_SPEED),
+        PREF_SCROLL: @YES,
+        PREF_FN_LOCK: @NO,
+        PREF_F12_MODE: @(TPF12OpenURL),
+        PREF_F12_URL: @"https://support.lenovo.com/accessories/trackpoint_keyboard",
+        PREF_F12_TEXT: @"",
+        PREF_F12_FILES: @[],
+        PREF_ENABLED: @YES,
+        PREF_BLOCK_MIDDLE: @NO,
+    }];
+    s_enabled = [ud boolForKey:PREF_ENABLED];
+    s_blockMiddle = [ud boolForKey:PREF_BLOCK_MIDDLE];
+    s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
+    s_f18Enabled = [ud boolForKey:PREF_F18];
+    s_swapEnabled = [ud boolForKey:PREF_SWAP];
+    s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
+    s_preferredScroll = [ud boolForKey:PREF_SCROLL];
+    s_fnLock = [ud boolForKey:PREF_FN_LOCK];
+    s_f12Mode = (TPF12Mode)MAX(TPF12Disabled,
+        MIN(TPF12TypeText, [ud integerForKey:PREF_F12_MODE]));
+    if ([[ud objectForKey:PREF_F12_URL] isKindOfClass:NSString.class])
+        s_f12URL = [ud stringForKey:PREF_F12_URL];
+    if ([[ud objectForKey:PREF_F12_TEXT] isKindOfClass:NSString.class])
+        s_f12Text = [ud stringForKey:PREF_F12_TEXT];
+    NSArray *storedFiles = [ud arrayForKey:PREF_F12_FILES];
+    if (storedFiles) {
+        NSMutableArray<NSString *> *validFiles = [NSMutableArray array];
+        for (id path in storedFiles)
+            if ([path isKindOfClass:NSString.class] && validFiles.count < 4)
+                [validFiles addObject:path];
+        s_f12Files = [validFiles copy];
+    }
+}
+
 int main(int argc, const char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return run_self_test();
     freopen("/tmp/trackpointd.log", "a", stderr);
     setvbuf(stderr, NULL, _IONBF, 0);
 
     @autoreleasepool {
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud registerDefaults:@{
-            PREF_SENSITIVITY: @(TP_SENSITIVITY_DEFAULT),
-            PREF_F18: @YES,
-            PREF_SWAP: @YES,
-            PREF_SCROLL_SPEED: @(SCROLL_SPEED),
-            PREF_SCROLL: @YES,
-            PREF_FN_LOCK: @NO,
-            PREF_F12_MODE: @(TPF12OpenURL),
-            PREF_F12_URL: @"https://support.lenovo.com/accessories/trackpoint_keyboard",
-            PREF_F12_TEXT: @"",
-            PREF_F12_FILES: @[],
-            PREF_ENABLED: @YES,
-            PREF_BLOCK_MIDDLE: @NO,
-        }];
-        s_enabled = [ud boolForKey:PREF_ENABLED];
-        s_blockMiddle = [ud boolForKey:PREF_BLOCK_MIDDLE];
-        s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
-        s_f18Enabled = [ud boolForKey:PREF_F18];
-        s_swapEnabled = [ud boolForKey:PREF_SWAP];
-        s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
-        s_preferredScroll = [ud boolForKey:PREF_SCROLL];
-        s_fnLock = [ud boolForKey:PREF_FN_LOCK];
-        s_f12Mode = (TPF12Mode)MAX(TPF12Disabled,
-            MIN(TPF12TypeText, [ud integerForKey:PREF_F12_MODE]));
-        if ([[ud objectForKey:PREF_F12_URL] isKindOfClass:NSString.class])
-            s_f12URL = [ud stringForKey:PREF_F12_URL];
-        if ([[ud objectForKey:PREF_F12_TEXT] isKindOfClass:NSString.class])
-            s_f12Text = [ud stringForKey:PREF_F12_TEXT];
-        NSArray *storedFiles = [ud arrayForKey:PREF_F12_FILES];
-        if (storedFiles) {
-            NSMutableArray<NSString *> *validFiles = [NSMutableArray array];
-            for (id path in storedFiles)
-                if ([path isKindOfClass:NSString.class] && validFiles.count < 4)
-                    [validFiles addObject:path];
-            s_f12Files = [validFiles copy];
-        }
+        load_preferences();
 
         LOG("prefs: enabled=%s sensitivity=%d scroll=%.1f preferred=%s fnLock=%s f18=%s swap=%s",
             s_enabled ? "on" : "paused", s_sensitivity, s_scrollSpeed,
