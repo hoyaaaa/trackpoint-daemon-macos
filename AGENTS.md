@@ -5,10 +5,12 @@
 Single-file Objective-C menu bar app for the ThinkPad TrackPoint Keyboard II.
 Keep it dependency-free and compatible with macOS 12+.
 
-Supported hardware only:
+Supported hardware (exact matching only):
 
 - VID `0x17EF`, USB receiver PID `0x60EE`
 - VID `0x17EF`, Bluetooth LE PID `0x60E1`
+- Experimental: VID `0x17EF`, Compact Bluetooth PID `0x6048`; physical-hardware
+  verification pending. No hardware configuration, hotkeys or key remaps for this model.
 
 Do not broaden matching to every Lenovo device.
 
