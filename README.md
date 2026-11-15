@@ -241,6 +241,41 @@ Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
 middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
 before a report is used.
 
+## Contributing
+
+**Feature additions and behavior changes (including bug fixes) must include
+automated test code, and all tests must pass before merge.** Passing the existing
+suite without tests for the changed behavior is not sufficient. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for test, hardware-verification and PR requirements.
+
+## Automated tests and merge requirements
+
+Run all non-interactive tests with `bash scripts/test.sh`. GitHub Actions runs
+this command on macOS for pull requests into main and pushes to main.
+
+Coverage includes protocol parsing, device filtering and lifecycle, hardware-setting
+requests/failure fallback, key-remap combinations, USB/BLE scrolling and duplicate
+suppression, pointer scaling, middle-click behavior, event-tap recovery, F12 actions,
+hotkeys, microphone-mute failure paths, isolated preference persistence/startup
+validation, settings/editor behavior, and installer upgrade/rollback/uninstall.
+See [the test coverage matrix](tests/README.md) for boundaries and test files.
+
+Runtime tests intercept device APIs, processes, URLs, audio changes and generated
+input. Preferences use a fresh test-only suite. Installer tests use redirected
+copies and intercepted commands in a temporary filesystem; the real installer
+also runs in `--check` mode with ad-hoc signing, without installing anything.
+
+Physical HID delivery and firmware behavior, actual OS permission approval,
+Login Item registration, real app/URL launching and input delivery, and visual/
+accessibility usability still require manual integration or hardware testing.
+
+The `macOS tests` check must pass and the branch must be up to date before
+anyone can merge into main; this test rule has no bypass. All files are owned by
+`@hoyaaaa`, and other contributors need one code-owner approval. The separate
+review rule allows only `@hoyaaaa` to bypass the review requirement when merging
+a PR, including their own PRs. This does not bypass tests or permit direct pushes,
+force pushes or main deletion. New commits dismiss prior review approvals.
+
 ## Build check
 
 ```bash
