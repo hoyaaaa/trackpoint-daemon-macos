@@ -4,6 +4,18 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.7.1 — 2026-11-17
+
+### Changed
+- Run CI and release checks on Intel macOS runners to avoid ARM runner capacity failures.
+- Apply the same Windows vertical wheel decoding and 80ms batching to Bluetooth
+  Keyboard II events whose original HID sender can be identified exactly.
+- Replace the original Bluetooth vertical event instead of adding a second event.
+  Preserve other mice and unknown sources; fall back to native input if optional
+  system APIs are unavailable. Add simultaneous-input and duplicate-scroll tests.
+- Verify Bluetooth and simultaneous trackpad input on hardware. Karabiner must
+  exclude the Bluetooth keyboard so its original HID sender remains available.
+
 ## 2.7.0 — 2026-11-16
 
 ### Changed

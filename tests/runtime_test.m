@@ -217,6 +217,44 @@ static void (^pendingDownload)(NSData *,NSURLResponse *,NSError *);
 - (NSInteger)clearContents { copiedCommand=nil; return 0; }
 - (BOOL)setString:(NSString *)text forType:(NSPasteboardType)type { assert([type isEqual:NSPasteboardTypeString]); copiedCommand=[text copy]; return YES; }
 @end
+/* Fake registry tree and optional HID SPI: no device opens or global input. */
+static NSDictionary *wheelRegistry;
+static uint64_t wheelSender;
+static double wheelX,wheelY;
+static BOOL wheelHasHID;
+static CFTypeRef copy_wheel(CGEventRef event) {
+    (void)event; return wheelHasHID ? CFRetain(CFSTR("test wheel")) : NULL;
+}
+static uint64_t wheel_sender(CFTypeRef hid) { (void)hid; return wheelSender; }
+static double wheel_value(CFTypeRef hid,uint32_t field) {
+    (void)hid; assert(field==(6u<<16) || field==((6u<<16)|1));
+    return field==((6u<<16)|1) ? wheelY : wheelX;
+}
+static CFMutableDictionaryRef registry_matching(uint64_t sender) {
+    return (CFMutableDictionaryRef)CFBridgingRetain([@{@"sender":@(sender)} mutableCopy]);
+}
+static io_service_t registry_service(CFMutableDictionaryRef matching) {
+    NSNumber *sender=((__bridge NSDictionary *)matching)[@"sender"];
+    io_service_t entry=wheelRegistry[sender] ? sender.unsignedIntValue : 0;
+    CFRelease(matching); return entry;
+}
+static kern_return_t registry_id(io_registry_entry_t entry,uint64_t *value) {
+    if (!wheelRegistry[@(entry)]) return KERN_FAILURE;
+    *value=entry; return KERN_SUCCESS;
+}
+static kern_return_t registry_parent(io_registry_entry_t entry,io_registry_entry_t *parent) {
+    *parent=[wheelRegistry[@(entry)] unsignedIntValue];
+    return *parent ? KERN_SUCCESS : KERN_FAILURE;
+}
+static io_service_t device_service(IOHIDDeviceRef device) {
+    return [((__bridge NSDictionary *)device)[@"registry"] unsignedIntValue];
+}
+#define IORegistryEntryIDMatching registry_matching
+#define IOServiceGetMatchingService(port,matching) registry_service(matching)
+#define IORegistryEntryGetRegistryEntryID registry_id
+#define IORegistryEntryGetParentEntry(entry,plane,parent) registry_parent(entry,parent)
+#define IOHIDDeviceGetService device_service
+#define IOObjectRelease(entry) KERN_SUCCESS
 #define NSURLSession TestSession
 #define NSPasteboard TestPasteboard
 #define NSOpenPanel TestOpenPanel
@@ -431,9 +469,9 @@ static void test_hid_input(void) {
     native_middle_changed(usb,false);
     assert(!usb->wheelTimer && !usb->wheelBatch.pending && !events.count);
     wheel[1]=2;wheel[2]=0;report(ble,0x16,wheel,3);
-    assert(events.count==1 && [events[0][@"lineX"] intValue]==1 && !ble->wheelTimer);
+    assert(events.count==1 && [events[0][@"lineX"] intValue]==1 && ble->wheelTimer);
     [events removeAllObjects];wheel[1]=0;wheel[2]=3;report(ble,0x16,wheel,3);
-    assert(!events.count && !ble->wheelTimer);
+    assert(!events.count && !ble->wheelBatch.lastMagnitude);
     [events removeAllObjects]; s_enabled=NO; report(usb,0x16,wheel,3); assert(!events.count);
     s_enabled=YES; s_preferredScroll=NO; report(usb,0x16,wheel,3); assert(!events.count);
     s_preferredScroll=YES;
@@ -486,6 +524,104 @@ static void test_pointer_and_scroll(void) {
     assert(!usb->nativeMiddleDown && tapEnabled);
     s_enabled=NO; tapEnabled=NO; unified_callback(NULL,kCGEventTapDisabledByUserInput,NULL,NULL);
     assert(!tapEnabled); s_tap=NULL;
+}
+static void test_ble_wheel_replacement(void) {
+    clear(); load_wheel_source_api();
+    s_copyHIDWheel=copy_wheel; s_HIDWheelSender=wheel_sender; s_HIDWheelValue=wheel_value;
+    wheelHasHID=YES; wheelX=0; wheelY=3; wheelSender=301;
+    // 301 is a child of this BLE HID service; 401 is another mouse on the same hub.
+    wheelRegistry=@{@301:@300,@300:@10,@401:@400,@400:@10,@10:@0,@501:@500,@500:@10};
+    NSDictionary *props=@{@kIOHIDVendorIDKey:@(LENOVO_VID),@kIOHIDProductIDKey:@(TP_BLE_PID),@"registry":@300};
+    TPHIDDevice *ble=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)props];
+    [s_tpDevices addObject:ble];
+    CGEventRef event=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitPixel,1,40);
+    CGEventSetTimestamp(event,123456789);
+    CFDataRef before=CGEventCreateData(NULL,event);
+    native_middle_changed(ble,true);
+    // A vendor vertical and the matching native event count only once.
+    uint8_t vendor[]={0x16,0,3}; report(ble,0x16,vendor,3);
+    assert(!ble->wheelBatch.pending && !events.count);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    assert(ble->wheelBatch.pending==1 && ble->wheelBatch.lastMagnitude==3);
+    // Interleave another mouse, including identical time/delta: it must pass unchanged.
+    wheelSender=401;
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event);
+    CFDataRef after=CGEventCreateData(NULL,event); assert(CFEqual(before,after)); CFRelease(after);
+    assert(ble->wheelBatch.pending==1 && !events.count);
+    wheelSender=301; report(ble,0x16,vendor,3);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    [ble->wheelTimer fire];
+    assert(events.count==1 && [events[0][@"lineY"] intValue]==6);
+    assert(![events[0][@"continuous"] boolValue]);
+    [ble->wheelTimer fire]; assert(events.count==1); // no replay on the next tick
+    // Original Windows negative mapping and natural direction, not accelerated Quartz 40.
+    wheelY=-3; s_naturalScroll=YES;
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    [ble->wheelTimer fire]; assert([events.lastObject[@"lineY"] intValue]==2);
+    [events removeAllObjects]; s_naturalScroll=NO;
+    // Same VID/PID on a second physical keyboard cannot enter this keyboard's batch.
+    props=@{@kIOHIDVendorIDKey:@(LENOVO_VID),@kIOHIDProductIDKey:@(TP_BLE_PID),@"registry":@500};
+    TPHIDDevice *second=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)props];
+    [s_tpDevices addObject:second]; wheelSender=501; wheelY=2;
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    assert(!ble->wheelBatch.pending && second->wheelBatch.pending==1);
+    [second->wheelTimer fire]; assert([events.lastObject[@"lineY"] intValue]==2);
+    // Horizontal vendor reports still participate in the Windows per-device count.
+    [events removeAllObjects]; wheelSender=301; wheelY=3;
+    vendor[1]=2; vendor[2]=0; report(ble,0x16,vendor,3);
+    assert(events.count==1 && [events[0][@"lineX"] intValue]==1);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    [ble->wheelTimer fire]; assert(events.count==2 && [events[1][@"lineY"] intValue]==6);
+    vendor[1]=0; vendor[2]=3;
+    // All bytes use the same pure decoder as USB; no unsupported native event is eaten.
+    for (int byte=0;byte<256;byte++) {
+        [events removeAllObjects]; wheelY=(int8_t)byte;
+        CGEventRef result=unified_callback(NULL,kCGEventScrollWheel,event,NULL);
+        int expected=tp_wheel_units((uint8_t)byte);
+        assert(result==(expected ? NULL : event));
+        if (expected) {
+            [ble->wheelTimer fire];
+            assert(events.count==1 && [events[0][@"lineY"] intValue]==expected);
+            [ble->wheelTimer fire]; assert(events.count==1);
+        } else assert(!events.count && !ble->wheelBatch.pending);
+    }
+    // Matching a PID alone is insufficient, including a source on the same registry node.
+    props=@{@kIOHIDVendorIDKey:@123,@kIOHIDProductIDKey:@(TP_BLE_PID),@"registry":@300};
+    TPHIDDevice *wrongVendor=[[TPHIDDevice alloc] initWithDevice:(__bridge IOHIDDeviceRef)props];
+    [s_tpDevices removeObject:ble]; [s_tpDevices addObject:wrongVendor]; wheelSender=301; wheelY=3;
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event);
+    [s_tpDevices removeObject:wrongVendor]; [s_tpDevices addObject:ble];
+    // Unknown/native/synthetic events are never suppressed using a recent-device guess.
+    for (NSNumber *sender in @[@0,@999,@401,@10]) {
+        wheelSender=sender.unsignedLongLongValue;
+        assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event);
+    }
+    wheelSender=301;
+    for (NSNumber *invalid in @[@0,@8,@(-8),@0.5,@128,@(-129),@(NAN),@(INFINITY)]) {
+        wheelY=invalid.doubleValue;
+        assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event);
+    }
+    wheelY=3; wheelX=1;
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); wheelX=0;
+    wheelHasHID=NO; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); wheelHasHID=YES;
+    s_copyHIDWheel=NULL; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); s_copyHIDWheel=copy_wheel;
+    s_HIDWheelSender=NULL; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); s_HIDWheelSender=wheel_sender;
+    s_HIDWheelValue=NULL; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); s_HIDWheelValue=wheel_value;
+    s_enabled=NO; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); s_enabled=YES;
+    s_preferredScroll=NO; assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event); s_preferredScroll=YES;
+    // Release/pause/wake/disconnect discard queued replacement output.
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    native_middle_changed(ble,false); assert(!ble->wheelTimer && !ble->wheelBatch.pending);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    [ble resetAfterWake]; assert(!ble->wheelTimer && !ble->wheelBatch.pending);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    reset_gesture_state(); assert(!ble->wheelTimer && !ble->wheelBatch.pending);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==NULL);
+    hid_removed(NULL,0,NULL,ble->device); assert(!ble->wheelTimer && !ble->wheelBatch.pending);
+    assert(unified_callback(NULL,kCGEventScrollWheel,event,NULL)==event);
+    CFRelease(before); CFRelease(event);
+    s_copyHIDWheel=NULL; s_HIDWheelSender=NULL; s_HIDWheelValue=NULL;
+    wheelRegistry=nil;
 }
 static void test_lifecycle(void) {
     clear();
@@ -1047,7 +1183,7 @@ int main(void) {
         assert(openedSettings==previousOpens+1);
         assert([g_app applicationShouldHandleReopen:NSApp hasVisibleWindows:YES]);
         assert(openedSettings==previousOpens+1);
-        test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
+        test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll(); test_ble_wheel_replacement();
         test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_upgrade_state(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];
         puts("runtime/device/action/preferences tests: ok (all external effects intercepted)");
