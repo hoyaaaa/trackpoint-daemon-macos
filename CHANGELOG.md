@@ -4,6 +4,14 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.6.1 — 2026-11-16
+
+### Fixed
+- Pass the ad-hoc build override through `env` when Homebrew invokes the staged
+  build. Formula commands do not accept Ruby's leading environment Hash.
+- Make the formula smoke test reject that unsupported call format so it cannot
+  pass locally while failing during a real Homebrew upgrade.
+
 ## 2.6.0 — 2026-11-16
 
 ### Changed

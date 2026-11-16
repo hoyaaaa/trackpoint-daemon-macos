@@ -28,7 +28,9 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
   formula.define_singleton_method(:libexec) { prefix/"libexec" }
   formula.define_singleton_method(:bin) { prefix/"bin" }
   formula.define_singleton_method(:system) do |*arguments|
-    raise "command failed: #{arguments}" unless Kernel.system(*arguments.map { |argument| argument.is_a?(Hash) ? argument : argument.to_s })
+    # Formula#system accepts command arguments, not Kernel.system's leading env Hash.
+    raise "Homebrew system does not accept an environment Hash" if arguments.any? { |argument| argument.is_a?(Hash) }
+    raise "command failed: #{arguments}" unless Kernel.system(*arguments.map(&:to_s))
   end
   # Before promotion, the old stable archive has no helpers: post_install is inert.
   formula.post_install

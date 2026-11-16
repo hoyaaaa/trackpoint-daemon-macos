@@ -11,7 +11,7 @@ class Trackpointd < Formula
 
   def install
     # Homebrew isolates builds from the login keychain. Sign persistently in post_install.
-    system({ "TRACKPOINTD_SIGN_IDENTITY" => "-" }, "bash", "scripts/build-app.sh", buildpath/"TrackPointD.app")
+    system "env", "TRACKPOINTD_SIGN_IDENTITY=-", "bash", "scripts/build-app.sh", buildpath/"TrackPointD.app"
     # The previous stable source archive has no local-signing helpers yet.
     if (buildpath/"scripts/signing-identity.sh").file?
       (libexec/"signing").install "scripts/signing-identity.sh", "scripts/setup-signing.sh"
