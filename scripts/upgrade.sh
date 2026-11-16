@@ -50,6 +50,7 @@ fi
 echo "Installing TrackPointD ${expected}…"
 "$brew" upgrade "$formula"
 app="$prefix/opt/trackpointd/TrackPointD.app"
+/bin/bash "$prefix/opt/trackpointd/libexec/signing/sign-app.sh" "$app"
 /usr/bin/codesign --verify --deep --strict "$app"
 actual=$("$app/Contents/MacOS/trackpointd" --version)
 [ "$actual" = "$expected" ] || { echo "Installed version $actual does not match $expected." >&2; exit 4; }

@@ -47,8 +47,11 @@ permission approval again after an upgrade.
 
 Homebrew source builds and `install.sh` automatically create a dedicated
 `TrackPointD Local Code Signing` certificate in the login keychain on first use,
-then reuse that certificate and private key on subsequent builds. Homebrew signs
-the installed bundle in `post_install`, outside its isolated compilation step. No paid Apple
+then reuse that certificate and private key on subsequent builds. Homebrew builds
+in isolation; the `trackpointd` launcher and in-app updater sign the installed
+bundle afterward, outside Homebrew's build and post-install sandbox. Run
+`trackpointd` once after a manual brew install/upgrade before opening the app
+bundle directly or adding it to Login Items. No paid Apple
 Developer subscription or additional dependency is needed. macOS may ask you to
 unlock the login keychain or approve `/usr/bin/codesign` using the key. This is
 local signing, not Developer ID distribution or notarization.
