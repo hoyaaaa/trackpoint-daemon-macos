@@ -570,8 +570,14 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
 }
 @end
 
+#import "windows-theme.h"
+
 @interface SettingsWindowController : NSWindowController <NSTextFieldDelegate,
-    NSTableViewDataSource, NSTableViewDelegate>
+    NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate>
+@property (strong) NSTabView *propertyTabs;
+@property (strong) NSArray<NSButton *> *propertyTabButtons;
+@property (copy) NSDictionary *windowsBaseline;
+@property (strong) NSButton *windowsApplyButton;
 @property (strong) TPPermissionGuide *permissionGuide;
 @property (strong) NSTextField *keyboardStatus;
 @property (strong) NSTextField *accessStatus;
@@ -615,62 +621,60 @@ static SettingsWindowController *g_settings = nil;
 @implementation SettingsWindowController
 
 - (instancetype)init {
-    NSWindow *win = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 520, 520)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+    NSWindow *win = [[TPWindowsPropertyWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 500, 516)
+        styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
         defer:NO];
-    win.title = @"ThinkPad TrackPoint Keyboard Properties";
+    win.title = @"Keyboard Properties";
+    win.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    win.backgroundColor = [NSColor colorWithWhite:.94 alpha:1];
     win.releasedWhenClosed = NO;
+    win.hasShadow = YES;
+    win.movableByWindowBackground = YES;
     self = [super initWithWindow:win];
     if (!self) return nil;
+    win.delegate = self;
     [self buildUI];
     return self;
 }
 
 - (void)buildUI {
     NSView *cv = self.window.contentView;
-    CGFloat W = 520, H = 520;
-    NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(12, 12, W - 24, H - 24)];
+    NSTabView *tabs = [[TPWindowsTabView alloc] initWithFrame:NSMakeRect(8, 38, 484, 418)];
+    tabs.tabViewType = NSNoTabsNoBorder;
+    self.propertyTabs = tabs;
     [cv addSubview:tabs];
 
     /* Lenovo's Windows property page keeps its three settings together. */
     NSTabViewItem *windowsItem = [[NSTabViewItem alloc] initWithIdentifier:@"windows"];
-    windowsItem.label = @"Keyboard";
+    windowsItem.label = @"TrackPoint";
     NSView *windowsView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 488, 460)];
     windowsItem.view = windowsView;
     [tabs addTabViewItem:windowsItem];
 
-    NSImageView *keyboardImage = [[NSImageView alloc] initWithFrame:NSMakeRect(154, 354, 180, 74)];
-    keyboardImage.image = [NSImage imageWithSystemSymbolName:@"keyboard"
-                                    accessibilityDescription:@"ThinkPad TrackPoint Keyboard II"];
-    keyboardImage.imageScaling = NSImageScaleProportionallyUpOrDown;
+    NSImageView *keyboardImage = [[NSImageView alloc] initWithFrame:NSMakeRect(96, 248, 296, 160)];
+    keyboardImage.image = [[NSBundle mainBundle] imageForResource:@"keyboard-windows"];
+    keyboardImage.imageScaling = NSImageScaleAxesIndependently;
+    keyboardImage.accessibilityLabel = @"ThinkPad TrackPoint Keyboard II";
     [windowsView addSubview:keyboardImage];
 
-    NSTextField *trackPointDot = [NSTextField labelWithString:@"●"];
-    trackPointDot.font = [NSFont systemFontOfSize:18 weight:NSFontWeightBold];
-    trackPointDot.textColor = [NSColor systemRedColor];
-    trackPointDot.alignment = NSTextAlignmentCenter;
-    trackPointDot.frame = NSMakeRect(232, 379, 24, 24);
-    trackPointDot.accessibilityLabel = @"TrackPoint";
-    [windowsView addSubview:trackPointDot];
-
-    NSBox *pointerBox = [[NSBox alloc] initWithFrame:NSMakeRect(20, 244, 448, 96)];
+    TPWindowsGroupBox *pointerBox = [[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18, 182, 448, 52)];
     pointerBox.title = @"Pointer speed";
     [windowsView addSubview:pointerBox];
 
     NSTextField *minLbl = [NSTextField labelWithString:@"Slow"];
     minLbl.font = [NSFont systemFontOfSize:11];
-    minLbl.frame = NSMakeRect(12, 39, 38, 16);
+    minLbl.frame = NSMakeRect(14, 14, 38, 16);
     [pointerBox addSubview:minLbl];
 
     NSTextField *maxLbl = [NSTextField labelWithString:@"Fast"];
     maxLbl.font = [NSFont systemFontOfSize:11];
     maxLbl.alignment = NSTextAlignmentRight;
-    maxLbl.frame = NSMakeRect(398, 39, 38, 16);
+    maxLbl.frame = NSMakeRect(280, 14, 38, 16);
     [pointerBox addSubview:maxLbl];
 
-    self.slider = [[NSSlider alloc] initWithFrame:NSMakeRect(54, 36, 340, 24)];
+    self.slider = [[NSSlider alloc] initWithFrame:NSMakeRect(72, 10, 200, 24)];
     self.slider.minValue = 1;
     self.slider.maxValue = 9;
     self.slider.numberOfTickMarks = 9;
@@ -689,6 +693,7 @@ static SettingsWindowController *g_settings = nil;
     self.applyStatus = [NSTextField labelWithString:@""];
     self.applyStatus.font = [NSFont systemFontOfSize:11];
     self.applyStatus.frame = NSMakeRect(12, 12, 270, 16);
+    self.applyStatus.hidden = YES;
     [pointerBox addSubview:self.applyStatus];
 
     self.slowTestButton = [NSButton buttonWithTitle:@"Try 1" target:self
@@ -696,6 +701,7 @@ static SettingsWindowController *g_settings = nil;
     self.slowTestButton.bezelStyle = NSBezelStyleRounded;
     self.slowTestButton.frame = NSMakeRect(302, 5, 62, 26);
     self.slowTestButton.toolTip = @"Apply the slowest hardware level for comparison.";
+    self.slowTestButton.hidden = YES;
     [pointerBox addSubview:self.slowTestButton];
 
     self.fastTestButton = [NSButton buttonWithTitle:@"Try 9" target:self
@@ -703,75 +709,84 @@ static SettingsWindowController *g_settings = nil;
     self.fastTestButton.bezelStyle = NSBezelStyleRounded;
     self.fastTestButton.frame = NSMakeRect(370, 5, 62, 26);
     self.fastTestButton.toolTip = @"Apply the fastest hardware level for comparison.";
+    self.fastTestButton.hidden = YES;
     [pointerBox addSubview:self.fastTestButton];
 
     self.preferredCheck = [NSButton checkboxWithTitle:@"ThinkPad Preferred Scrolling"
                            target:self action:@selector(togglePreferredScroll:)];
-    self.preferredCheck.frame = NSMakeRect(28, 205, 420, 22);
+    self.preferredCheck.frame = NSMakeRect(32, 146, 420, 22);
     [windowsView addSubview:self.preferredCheck];
 
     NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(20, 190, 448, 1)];
     separator.boxType = NSBoxSeparator;
+    separator.hidden = YES;
     [windowsView addSubview:separator];
 
-    NSTextField *star = [NSTextField labelWithString:@"★"];
-    star.font = [NSFont systemFontOfSize:40 weight:NSFontWeightRegular];
-    star.textColor = [NSColor systemRedColor];
-    star.alignment = NSTextAlignmentCenter;
-    star.frame = NSMakeRect(47, 111, 52, 50);
+    NSImageView *star = [[NSImageView alloc] initWithFrame:NSMakeRect(32, 32, 62, 42)];
+    star.image = [[NSBundle mainBundle] imageForResource:@"f12-windows"];
+    star.imageScaling = NSImageScaleAxesIndependently;
     star.accessibilityLabel = @"F12 User Defined Key";
     [windowsView addSubview:star];
 
     NSTextField *f12Help = [NSTextField wrappingLabelWithString:
         @"The key represented by the star icon allows you to set a user-defined function."];
     f12Help.font = [NSFont systemFontOfSize:11];
-    f12Help.frame = NSMakeRect(22, 53, 132, 58);
+    f12Help.frame = NSMakeRect(30, 90, 140, 42);
     [windowsView addSubview:f12Help];
 
-    NSTextField *f12ActionLabel = [NSTextField labelWithString:
+    NSTextField *f12ActionLabel = [NSTextField wrappingLabelWithString:
         @"The action for the User Defined Key:"];
     f12ActionLabel.font = [NSFont systemFontOfSize:11];
-    f12ActionLabel.frame = NSMakeRect(176, 166, 280, 18);
+    f12ActionLabel.frame = NSMakeRect(256, 108, 180, 30);
     [windowsView addSubview:f12ActionLabel];
 
     self.f12Summary = [NSTextField labelWithString:@""];
     self.f12Summary.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
-    self.f12Summary.frame = NSMakeRect(192, 140, 264, 18);
+    self.f12Summary.frame = NSMakeRect(280, 90, 184, 18);
     [windowsView addSubview:self.f12Summary];
 
     self.f12DetailLabel = [NSTextField labelWithString:@""];
     self.f12DetailLabel.font = [NSFont systemFontOfSize:11];
-    self.f12DetailLabel.frame = NSMakeRect(176, 112, 280, 18);
+    self.f12DetailLabel.frame = NSMakeRect(256, 68, 208, 18);
     [windowsView addSubview:self.f12DetailLabel];
 
     self.f12DetailValue = [NSTextField labelWithString:@""];
     self.f12DetailValue.font = [NSFont systemFontOfSize:11];
-    self.f12DetailValue.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    self.f12DetailValue.frame = NSMakeRect(192, 86, 264, 18);
+    self.f12DetailValue.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.f12DetailValue.frame = NSMakeRect(280, 42, 184, 18);
     [windowsView addSubview:self.f12DetailValue];
 
-    NSButton *modifyButton = [NSButton buttonWithTitle:@"Modify…" target:self
+    NSButton *modifyButton = [NSButton buttonWithTitle:@"Modify" target:self
                                                  action:@selector(showF12Editor:)];
     modifyButton.bezelStyle = NSBezelStyleRounded;
-    modifyButton.frame = NSMakeRect(370, 45, 86, 28);
+    modifyButton.frame = NSMakeRect(366, 8, 94, 32);
     [windowsView addSubview:modifyButton];
 
     /* macOS-only requirements and conveniences stay out of Lenovo's page. */
-    NSTabViewItem *macItem = [[NSTabViewItem alloc] initWithIdentifier:@"macos"];
-    macItem.label = @"macOS Integration";
+    NSTabViewItem *macItem = [[NSTabViewItem alloc] initWithIdentifier:@"permissions"];
+    macItem.label = @"Permissions";
     NSView *macView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 488, 460)];
+    self.applyStatus.hidden = NO;
+    self.applyStatus.frame = NSMakeRect(32, 16, 260, 16);
+    [macView addSubview:self.applyStatus];
+    self.slowTestButton.hidden = self.fastTestButton.hidden = NO;
+    self.slowTestButton.frame = NSMakeRect(304, 10, 70, 26);
+    self.fastTestButton.frame = NSMakeRect(384, 10, 70, 26);
+    [macView addSubview:self.slowTestButton];
+    [macView addSubview:self.fastTestButton];
     macItem.view = macView;
     [tabs addTabViewItem:macItem];
 
-    NSBox *deviceBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 382, 452, 58)];
+    TPWindowsGroupBox *deviceBox = [[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18, 382, 452, 58)];
     deviceBox.title = @"Device";
     [macView addSubview:deviceBox];
     self.keyboardStatus = [NSTextField labelWithString:@""];
     self.keyboardStatus.font = [NSFont systemFontOfSize:12];
-    self.keyboardStatus.frame = NSMakeRect(14, 15, 424, 18);
+    self.keyboardStatus.frame = NSMakeRect(14, 16, 424, 18);
+    self.keyboardStatus.lineBreakMode = NSLineBreakByTruncatingTail;
     [deviceBox addSubview:self.keyboardStatus];
 
-    NSBox *permissionsBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 242, 452, 128)];
+    TPWindowsGroupBox *permissionsBox = [[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18, 242, 452, 128)];
     permissionsBox.title = @"macOS Permissions";
     [macView addSubview:permissionsBox];
 
@@ -782,7 +797,7 @@ static SettingsWindowController *g_settings = nil;
     self.accessibilityBtn = [NSButton buttonWithTitle:@"Request Access…" target:self
                                                action:@selector(requestAccessibility:)];
     self.accessibilityBtn.bezelStyle = NSBezelStyleRounded;
-    self.accessibilityBtn.frame = NSMakeRect(300, 68, 136, 28);
+    self.accessibilityBtn.frame = NSMakeRect(300, 70, 136, 28);
     [permissionsBox addSubview:self.accessibilityBtn];
 
     self.inputStatus = [NSTextField labelWithString:@""];
@@ -792,7 +807,7 @@ static SettingsWindowController *g_settings = nil;
     self.inputMonitoringBtn = [NSButton buttonWithTitle:@"Request Access…" target:self
                                                  action:@selector(requestInputMonitoring:)];
     self.inputMonitoringBtn.bezelStyle = NSBezelStyleRounded;
-    self.inputMonitoringBtn.frame = NSMakeRect(300, 35, 136, 28);
+    self.inputMonitoringBtn.frame = NSMakeRect(300, 37, 136, 28);
     [permissionsBox addSubview:self.inputMonitoringBtn];
 
     NSTextField *permissionHelp = [NSTextField labelWithString:
@@ -802,7 +817,7 @@ static SettingsWindowController *g_settings = nil;
     permissionHelp.frame = NSMakeRect(14, 13, 422, 16);
     [permissionsBox addSubview:permissionHelp];
 
-    NSBox *keysBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 126, 452, 104)];
+    TPWindowsGroupBox *keysBox = [[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18, 126, 452, 104)];
     keysBox.title = @"Keyboard Options";
     [macView addSubview:keysBox];
 
@@ -824,7 +839,7 @@ static SettingsWindowController *g_settings = nil;
     self.blockMiddleCheck.toolTip = @"Block middle clicks from all pointing devices while a supported keyboard is connected. TrackPoint scrolling remains enabled.";
     [keysBox addSubview:self.blockMiddleCheck];
 
-    NSBox *extrasBox = [[NSBox alloc] initWithFrame:NSMakeRect(18, 56, 452, 58)];
+    TPWindowsGroupBox *extrasBox = [[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18, 56, 452, 58)];
     extrasBox.title = @"macOS TrackPoint Extras";
     [macView addSubview:extrasBox];
 
@@ -832,7 +847,7 @@ static SettingsWindowController *g_settings = nil;
     self.scrollLabel.font = [NSFont systemFontOfSize:11];
     self.scrollLabel.frame = NSMakeRect(14, 14, 150, 18);
     [extrasBox addSubview:self.scrollLabel];
-    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(166, 11, 210, 22)];
+    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(166, 12, 210, 22)];
     self.scrollSlider.minValue = 1.0;
     self.scrollSlider.maxValue = 8.0;
     self.scrollSlider.doubleValue = s_scrollSpeed;
@@ -879,8 +894,151 @@ static SettingsWindowController *g_settings = nil;
     warning.frame = NSMakeRect(20, 20, 448, 180);
     [supportView addSubview:warning];
 
+    // Group by what the setting controls, rather than by the OS implementing it.
+    NSTabViewItem *keyboardItem=[[NSTabViewItem alloc] initWithIdentifier:@"keyboard"];
+    keyboardItem.label=@"Keyboard";
+    NSView *keyboardView=[[NSView alloc] initWithFrame:NSMakeRect(0,0,484,418)];
+    keyboardItem.view=keyboardView;
+    [tabs insertTabViewItem:keyboardItem atIndex:1];
+
+    keysBox.frame=NSMakeRect(18,314,452,88);
+    [keyboardView addSubview:keysBox];
+    self.fnLockCheck.frame=NSMakeRect(14,42,424,20);
+    self.f18Check.frame=NSMakeRect(14,12,200,20);
+    self.swapCheck.frame=NSMakeRect(224,12,214,20);
+
+    TPWindowsGroupBox *f12Box=[[TPWindowsGroupBox alloc] initWithFrame:NSMakeRect(18,64,452,220)];
+    f12Box.title=@"F12 User Defined Key";
+    [keyboardView addSubview:f12Box];
+    star.frame=NSMakeRect(14,76,62,42); [f12Box addSubview:star];
+    f12Help.frame=NSMakeRect(14,138,160,60); [f12Box addSubview:f12Help];
+    f12ActionLabel.frame=NSMakeRect(228,166,200,32); [f12Box addSubview:f12ActionLabel];
+    self.f12Summary.frame=NSMakeRect(244,140,194,18); [f12Box addSubview:self.f12Summary];
+    self.f12DetailLabel.frame=NSMakeRect(228,114,208,18); [f12Box addSubview:self.f12DetailLabel];
+    self.f12DetailValue.frame=NSMakeRect(244,88,194,18); [f12Box addSubview:self.f12DetailValue];
+    modifyButton.frame=NSMakeRect(340,34,94,32); [f12Box addSubview:modifyButton];
+
+    extrasBox.frame=NSMakeRect(18,48,452,88);
+    extrasBox.title=@"Scrolling";
+    self.blockMiddleCheck.frame=NSMakeRect(14,44,424,20);
+    [extrasBox addSubview:self.blockMiddleCheck];
+    [windowsView addSubview:extrasBox];
+    [windowsView addSubview:self.applyStatus];
+    [windowsView addSubview:self.slowTestButton];
+    [windowsView addSubview:self.fastTestButton];
+
+    macView.frame=NSMakeRect(0,0,484,418);
+    deviceBox.frame=NSMakeRect(18,340,452,58);
+    permissionsBox.frame=NSMakeRect(18,196,452,128);
+
+    for (NSView *page in @[windowsView,keyboardView,macView,supportView])
+        tp_apply_windows_theme(page);
+    // Fit explanatory text after applying the final font, then stack with one gap.
+    supportView.frame=NSMakeRect(0,0,484,418);
+    CGFloat modelsHeight=ceil([models.cell cellSizeForBounds:NSMakeRect(0,0,448,1000)].height);
+    CGFloat warningHeight=ceil([warning.cell cellSizeForBounds:NSMakeRect(0,0,448,1000)].height);
+    models.frame=NSMakeRect(18,418-18-modelsHeight,448,modelsHeight);
+    warning.frame=NSMakeRect(18,NSMinY(models.frame)-16-warningHeight,448,warningHeight);
+    f12ActionLabel.font=[NSFont fontWithName:@"Tahoma-Bold" size:11];
+    self.f12DetailLabel.font=[NSFont fontWithName:@"Tahoma-Bold" size:11];
+    NSArray *actions=@[NSStringFromSelector(@selector(acceptWindowsSettings:)),
+        NSStringFromSelector(@selector(cancelWindowsSettings:)),
+        NSStringFromSelector(@selector(applyWindowsSettings:))];
+    NSArray *titles=@[@"OK",@"Cancel",@"Apply"];
+    for (NSUInteger i=0;i<3;i++) {
+        NSButton *button=[NSButton buttonWithTitle:titles[i] target:self action:NSSelectorFromString(actions[i])];
+        button.frame=NSMakeRect(258+i*81,6,74,26);
+        button.keyEquivalent=i==0 ? @"\r" : (i==1 ? @"\e" : @"");
+        [cv addSubview:button];
+        if (i==2) self.windowsApplyButton=button;
+        tp_apply_windows_theme(button);
+    }
+    // Native macOS extensions remain scrollable without changing the Windows page size.
+    for (NSTabViewItem *item in @[keyboardItem,macItem,supportItem]) {
+        NSView *document=item.view;
+        NSScrollView *scroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,484,418)];
+        scroll.hasVerticalScroller=YES; scroll.drawsBackground=YES;
+        scroll.backgroundColor=NSColor.whiteColor; scroll.documentView=document;
+        item.view=scroll;
+        [scroll.contentView scrollToPoint:NSMakePoint(0,MAX(0,document.frame.size.height-418))];
+    }
+    TPWindowsTitleBar *titleBar=[[TPWindowsTitleBar alloc] initWithFrame:NSMakeRect(0,486,500,30)];
+    [cv addSubview:titleBar];
+    NSButton *close=[NSButton buttonWithTitle:@"Close" target:self action:@selector(cancelWindowsSettings:)];
+    close.cell=[[TPWindowsCloseCell alloc] initTextCell:@"Close"];
+    close.target=self;close.action=@selector(cancelWindowsSettings:);
+    close.frame=NSMakeRect(460,0,40,30);close.accessibilityLabel=@"Close";
+    [titleBar addSubview:close];
+    NSMutableArray *tabButtons=[NSMutableArray array];
+    NSArray *widths=@[@108,@104,@116,@140];
+    CGFloat tabX=8;
+    for (NSUInteger i=0;i<tabs.numberOfTabViewItems;i++) {
+        NSButton *button=[NSButton buttonWithTitle:[tabs tabViewItemAtIndex:i].label target:self action:@selector(selectPropertyTab:)];
+        button.cell=[[TPWindowsTabCell alloc] initTextCell:button.title];
+        button.target=self;button.action=@selector(selectPropertyTab:);
+        button.tag=i;button.frame=NSMakeRect(tabX,456,[widths[i] doubleValue],22);
+        button.state=i==0;[cv addSubview:button];[tabButtons addObject:button];
+        tabX+=button.frame.size.width;
+    }
+    self.propertyTabButtons=tabButtons;
     [tabs selectTabViewItem:windowsItem];
     [self syncState];
+}
+
+- (void)selectPropertyTab:(NSButton *)sender {
+    [self.propertyTabs selectTabViewItemAtIndex:sender.tag];
+    for (NSButton *button in self.propertyTabButtons) button.state=button==sender;
+}
+
+- (NSDictionary *)windowsValues {
+    return @{PREF_SENSITIVITY:@(s_sensitivity), PREF_SCROLL:@(s_preferredScroll),
+        PREF_F12_MODE:@(s_f12Mode), PREF_F12_URL:s_f12URL ?: @"",
+        PREF_F12_TEXT:s_f12Text ?: @"", PREF_F12_FILES:s_f12Files ?: @[]};
+}
+
+- (void)beginWindowsEditing {
+    self.windowsBaseline = [self windowsValues];
+    [self syncState];
+}
+
+- (void)applyWindowsSettings:(id)sender {
+    (void)sender;
+    self.windowsBaseline = [self windowsValues];
+    for (NSString *key in self.windowsBaseline)
+        [NSUserDefaults.standardUserDefaults setObject:self.windowsBaseline[key] forKey:key];
+    [self syncState];
+}
+
+- (void)restoreWindowsSettings {
+    if (!self.windowsBaseline) return;
+    NSDictionary *values=self.windowsBaseline;
+    s_sensitivity=[values[PREF_SENSITIVITY] intValue];
+    s_preferredScroll=[values[PREF_SCROLL] boolValue];
+    s_f12Mode=[values[PREF_F12_MODE] intValue];
+    s_f12URL=values[PREF_F12_URL]; s_f12Text=values[PREF_F12_TEXT]; s_f12Files=values[PREF_F12_FILES];
+    NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
+    for (NSString *key in values) [defaults setObject:values[key] forKey:key];
+    reset_gesture_state(); apply_hardware_settings();
+    self.windowsBaseline=nil;
+    [self syncState];
+}
+
+- (void)acceptWindowsSettings:(id)sender {
+    [self applyWindowsSettings:sender];
+    self.windowsBaseline=nil;
+    [self.window close];
+}
+
+- (void)cancelWindowsSettings:(id)sender {
+    (void)sender;
+    [self restoreWindowsSettings];
+    [self.window close];
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    (void)sender;
+    [self restoreWindowsSettings];
+    return YES;
 }
 
 - (void)syncState {
@@ -966,13 +1124,16 @@ static SettingsWindowController *g_settings = nil;
     self.scrollLabel.toolTip = @"Controls vertical and horizontal TrackPoint scrolling.";
 
     [self updateF12Summary];
+    self.windowsApplyButton.enabled = self.windowsBaseline &&
+        ![self.windowsBaseline isEqualToDictionary:[self windowsValues]];
 }
 
 - (void)sliderChanged:(NSSlider *)slider {
     int val = (int)slider.integerValue;
     s_sensitivity = val;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", val];
-    [[NSUserDefaults standardUserDefaults] setInteger:val forKey:PREF_SENSITIVITY];
+    if (!self.windowsBaseline)
+        [[NSUserDefaults standardUserDefaults] setInteger:val forKey:PREF_SENSITIVITY];
     apply_hardware_settings();
     [self syncState];
     LOG("sensitivity -> %d (%s)", val,
@@ -1026,9 +1187,11 @@ static SettingsWindowController *g_settings = nil;
 
 - (void)togglePreferredScroll:(NSButton *)btn {
     s_preferredScroll = (btn.state == NSControlStateValueOn);
-    [[NSUserDefaults standardUserDefaults] setBool:s_preferredScroll forKey:PREF_SCROLL];
+    if (!self.windowsBaseline)
+        [[NSUserDefaults standardUserDefaults] setBool:s_preferredScroll forKey:PREF_SCROLL];
     reset_gesture_state();
     apply_hardware_settings();
+    [self syncState];
     LOG("Preferred Scrolling: %s", s_preferredScroll ? "ON" : "OFF");
 }
 
@@ -1069,26 +1232,29 @@ static SettingsWindowController *g_settings = nil;
     self.f12Summary.stringValue = summary;
     self.f12DetailLabel.stringValue = detailLabel;
     self.f12DetailValue.stringValue = detailValue;
+    self.f12DetailValue.textColor=s_f12Mode==TPF12OpenURL ? [NSColor colorWithSRGBRed:0 green:0 blue:.55 alpha:1] : NSColor.blackColor;
     self.f12DetailValue.toolTip = toolTip.length ? toolTip : nil;
 }
 
 - (void)buildF12Editor {
-    self.f12Panel = [[NSPanel alloc]
-        initWithContentRect:NSMakeRect(0, 0, 470, 292)
-        styleMask:NSWindowStyleMaskTitled
+    self.f12Panel = [[TPWindowsPropertyPanel alloc]
+        initWithContentRect:NSMakeRect(0, 0, 437, 322)
+        styleMask:NSWindowStyleMaskBorderless
         backing:NSBackingStoreBuffered
         defer:NO];
-    self.f12Panel.title = @"User Defined Key Settings";
+    self.f12Panel.title = @"Lenovo Settings";
     self.f12Panel.releasedWhenClosed = NO;
+    self.f12Panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    self.f12Panel.backgroundColor = [NSColor colorWithWhite:.94 alpha:1];
     NSView *view = self.f12Panel.contentView;
 
     NSTextField *instruction = [NSTextField labelWithString:
-        @"Select the action for the User Defined Key (F12):"];
+        @"Select the action for the User Defined Key:"];
     instruction.font = [NSFont systemFontOfSize:12];
-    instruction.frame = NSMakeRect(20, 248, 430, 18);
+    instruction.frame = NSMakeRect(27, 243, 377, 46);
     [view addSubview:instruction];
 
-    self.f12Popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(20, 210, 430, 28)];
+    self.f12Popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(27, 220, 366, 24)];
     [self.f12Popup addItemsWithTitles:@[@"Please select",
         @"Open applications or files", @"Open web site", @"Enter text"]];
     self.f12Popup.target = self;
@@ -1098,14 +1264,15 @@ static SettingsWindowController *g_settings = nil;
 
     NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(20, 195, 430, 1)];
     separator.boxType = NSBoxSeparator;
+    separator.hidden = YES;
     [view addSubview:separator];
 
     self.f12EditorLabel = [NSTextField labelWithString:@""];
     self.f12EditorLabel.font = [NSFont systemFontOfSize:12];
-    self.f12EditorLabel.frame = NSMakeRect(20, 164, 430, 18);
+    self.f12EditorLabel.frame = NSMakeRect(29, 193, 345, 18);
     [view addSubview:self.f12EditorLabel];
 
-    self.f12Value = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 130, 330, 24)];
+    self.f12Value = [[NSTextField alloc] initWithFrame:NSMakeRect(29, 159, 345, 25)];
     self.f12Value.selectable = YES;
     self.f12Value.delegate = self;
     self.f12Value.target = self;
@@ -1117,55 +1284,59 @@ static SettingsWindowController *g_settings = nil;
 
     self.f12FilesTable = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 330, 74)];
     NSTableColumn *fileColumn = [[NSTableColumn alloc] initWithIdentifier:@"file"];
-    fileColumn.width = 310;
+    fileColumn.width = 320;
     [self.f12FilesTable addTableColumn:fileColumn];
     self.f12FilesTable.headerView = nil;
     self.f12FilesTable.dataSource = self;
     self.f12FilesTable.delegate = self;
     self.f12FilesTable.allowsMultipleSelection = YES;
     self.f12FilesTable.accessibilityLabel = @"Applications or files to open";
-    self.f12FilesScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 78, 330, 76)];
+    self.f12FilesScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(32, 112, 345, 73)];
     self.f12FilesScroll.borderType = NSBezelBorder;
     self.f12FilesScroll.hasVerticalScroller = YES;
     self.f12FilesScroll.documentView = self.f12FilesTable;
     [view addSubview:self.f12FilesScroll];
 
-    self.f12ChooseBtn = [NSButton buttonWithTitle:@"Add…" target:self
+    self.f12ChooseBtn = [NSButton buttonWithTitle:@"Add" target:self
                                             action:@selector(chooseF12Files:)];
     self.f12ChooseBtn.bezelStyle = NSBezelStyleRounded;
-    self.f12ChooseBtn.frame = NSMakeRect(360, 128, 90, 28);
+    self.f12ChooseBtn.frame = NSMakeRect(32, 66, 124, 29);
     [view addSubview:self.f12ChooseBtn];
 
     self.f12RemoveBtn = [NSButton buttonWithTitle:@"Remove" target:self
                                             action:@selector(removeF12Files:)];
     self.f12RemoveBtn.bezelStyle = NSBezelStyleRounded;
-    self.f12RemoveBtn.frame = NSMakeRect(360, 92, 90, 28);
+    self.f12RemoveBtn.frame = NSMakeRect(352, 190, 64, 22);
     [view addSubview:self.f12RemoveBtn];
 
     self.f12Warning = [NSTextField wrappingLabelWithString:@""];
     self.f12Warning.font = [NSFont systemFontOfSize:11];
-    self.f12Warning.frame = NSMakeRect(20, 72, 430, 44);
+    self.f12Warning.frame = NSMakeRect(29, 110, 345, 44);
     [view addSubview:self.f12Warning];
 
     NSButton *cancel = [NSButton buttonWithTitle:@"Cancel" target:self
                                            action:@selector(cancelF12Editor:)];
     cancel.bezelStyle = NSBezelStyleRounded;
     cancel.keyEquivalent = @"\e";
-    cancel.frame = NSMakeRect(270, 20, 86, 30);
+    cancel.frame = NSMakeRect(312, 22, 105, 35);
     [view addSubview:cancel];
 
     NSButton *ok = [NSButton buttonWithTitle:@"OK" target:self
                                        action:@selector(saveF12Editor:)];
     ok.bezelStyle = NSBezelStyleRounded;
     ok.keyEquivalent = @"\r";
-    ok.frame = NSMakeRect(364, 20, 86, 30);
+    ok.frame = NSMakeRect(192, 22, 105, 35);
     [view addSubview:ok];
+    tp_apply_windows_theme(view);
+    TPWindowsTitleBar *titleBar=[[TPWindowsTitleBar alloc] initWithFrame:NSMakeRect(0,292,437,30)];
+    titleBar.caption=@"Lenovo Settings";
+    [view addSubview:titleBar];
 }
 
 - (void)showF12Editor:(id)sender {
     (void)sender;
     if (!self.f12Panel) [self buildF12Editor];
-    if (self.f12Panel.sheetParent) return;
+    if (self.f12Panel.visible) return;
 
     self.f12DraftMode = s_f12Mode;
     self.f12DraftURL = [s_f12URL copy] ?: @"";
@@ -1173,7 +1344,11 @@ static SettingsWindowController *g_settings = nil;
     self.f12DraftFiles = [s_f12Files copy] ?: @[];
     [self.f12Popup selectItemAtIndex:self.f12DraftMode];
     [self configureF12Controls];
-    [self.window beginSheet:self.f12Panel completionHandler:nil];
+    NSRect parent=self.window.frame;
+    [self.f12Panel setFrameOrigin:NSMakePoint(NSMidX(parent)-self.f12Panel.frame.size.width/2,
+        NSMidY(parent)-self.f12Panel.frame.size.height/2)];
+    [self.f12Panel makeKeyAndOrderFront:nil];
+    [NSApp runModalForWindow:self.f12Panel];
 }
 
 - (void)updateF12Validation {
@@ -1185,12 +1360,14 @@ static SettingsWindowController *g_settings = nil;
     if (invalidURL) {
         self.f12Warning.hidden = NO;
         self.f12Warning.textColor = NSColor.systemRedColor;
+        self.f12Warning.frame = NSMakeRect(29, 110, 345, 44);
         self.f12Warning.stringValue = @"Enter a valid http:// or https:// web-site URL.";
     } else if (self.f12DraftMode == TPF12TypeText) {
         self.f12Warning.hidden = NO;
-        self.f12Warning.textColor = NSColor.systemOrangeColor;
+        self.f12Warning.frame = NSMakeRect(29, 128, 345, 80);
+        self.f12Warning.textColor = NSColor.blackColor;
         self.f12Warning.stringValue =
-            @"Do not store passwords or personal information. Saved text is not encrypted.";
+            @"This can be used to enter commonly entered text, such as e-mail or postal addresses.\n\nLenovo recommends never using this feature for storing and entering passwords or any other private information.";
     } else {
         self.f12Warning.hidden = YES;
         self.f12Warning.stringValue = @"";
@@ -1204,6 +1381,9 @@ static SettingsWindowController *g_settings = nil;
     self.f12FilesScroll.hidden = !filesMode;
     self.f12EditorLabel.hidden = self.f12DraftMode == TPF12Disabled;
     self.f12Value.hidden = self.f12DraftMode == TPF12Disabled || filesMode;
+    BOOL textMode = self.f12DraftMode == TPF12TypeText;
+    self.f12Value.frame=NSMakeRect(29, textMode ? 74 : 159, 345, 25);
+    self.f12EditorLabel.frame=NSMakeRect(29, textMode ? 101 : 193, 345, 18);
     self.f12Value.editable = YES;
     self.f12Value.toolTip = nil;
     self.f12Value.placeholderString = nil;
@@ -1278,18 +1458,26 @@ static SettingsWindowController *g_settings = nil;
     s_f12URL = [self.f12DraftURL copy] ?: @"";
     s_f12Text = [self.f12DraftText copy] ?: @"";
     s_f12Files = [self.f12DraftFiles copy] ?: @[];
+    if (!self.windowsBaseline) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setInteger:s_f12Mode forKey:PREF_F12_MODE];
     [defaults setObject:s_f12URL forKey:PREF_F12_URL];
     [defaults setObject:s_f12Text forKey:PREF_F12_TEXT];
     [defaults setObject:s_f12Files forKey:PREF_F12_FILES];
-    [self.window endSheet:self.f12Panel];
+    }
+    [self dismissF12Editor];
     [self updateF12Summary];
+    [self syncState];
+}
+
+- (void)dismissF12Editor {
+    if (NSApp.modalWindow==self.f12Panel) [NSApp stopModal];
+    [self.f12Panel orderOut:nil];
 }
 
 - (void)cancelF12Editor:(id)sender {
     (void)sender;
-    [self.window endSheet:self.f12Panel];
+    [self dismissF12Editor];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
@@ -1305,6 +1493,8 @@ static SettingsWindowController *g_settings = nil;
     if (!field) {
         field = [NSTextField labelWithString:@""];
         field.identifier = @"F12File";
+        field.font = [NSFont fontWithName:@"Tahoma" size:11];
+        field.textColor = NSColor.blackColor;
         field.lineBreakMode = NSLineBreakByTruncatingMiddle;
     }
     NSString *path = self.f12DraftFiles[(NSUInteger)row];
@@ -1699,7 +1889,14 @@ static NSImage *status_icon(NSColor *dotColor) {
     }
 }
 
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)application hasVisibleWindows:(BOOL)visible {
+    (void)application;
+    if (!visible) [self openSettings:nil];
+    return YES;
+}
+
 - (void)openSettings:(id)sender {
+    if (!g_settings.window.visible) [g_settings beginWindowsEditing];
     [g_settings syncState];
     /* Switch to regular policy so window comes to front over other apps */
     NSApp.activationPolicy = NSApplicationActivationPolicyRegular;

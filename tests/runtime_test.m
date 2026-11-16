@@ -754,6 +754,10 @@ static void test_preferences_and_editor(void) {
                     [NSURL fileURLWithPath:@"/tmp/e"]];
     [settings chooseF12Files:nil];
     assert(settings.f12DraftFiles.count==4 && limitWarnings==1);
+    NSTextField *fileRow=(NSTextField *)[settings tableView:settings.f12FilesTable
+        viewForTableColumn:settings.f12FilesTable.tableColumns.firstObject row:0];
+    assert([fileRow.font.fontName containsString:@"Tahoma"]);
+    assert(fileRow.font.pointSize==11);
     assert([settings.f12DraftFiles.lastObject isEqual:@"/tmp/d"]);
     panelResponse=NSModalResponseCancel; selectedFiles=@[[NSURL fileURLWithPath:@"/tmp/z"]];
     [settings chooseF12Files:nil]; assert(settings.f12DraftFiles.count==4); panelResponse=NSModalResponseOK;
@@ -763,8 +767,8 @@ static void test_preferences_and_editor(void) {
     settings.f12DraftMode=TPF12Disabled;
     [settings saveF12Editor:nil]; assert(s_f12Mode==TPF12Disabled);
     NSTabView *tabs=settings.window.contentView.subviews.firstObject;
-    assert([tabs tabViewItemAtIndex:2] && [[tabs tabViewItemAtIndex:2].identifier isEqual:@"support"]);
-    for (NSView *label in [tabs tabViewItemAtIndex:2].view.subviews) {
+    assert([tabs tabViewItemAtIndex:3] && [[tabs tabViewItemAtIndex:3].identifier isEqual:@"support"]);
+    for (NSView *label in ((NSScrollView *)[tabs tabViewItemAtIndex:3].view).documentView.subviews) {
         if (![label isKindOfClass:NSTextField.class]) continue;
         NSTextField *field=(NSTextField *)label;
         assert([field.cell cellSizeForBounds:NSMakeRect(0,0,field.frame.size.width,1000)].height<=field.frame.size.height);
@@ -785,6 +789,88 @@ static void test_preferences_and_editor(void) {
     s_enabled=NO; sync(settings,@selector(syncState)); assert(!settings.slider.enabled && !settings.blockMiddleCheck.enabled);
     s_enabled=YES; sync(settings,@selector(syncState)); assert(settings.slider.enabled && settings.blockMiddleCheck.enabled);
     [settings.window close];
+    assert(NSEqualSizes(settings.window.frame.size, NSMakeSize(500,516)));
+    assert([settings.window isKindOfClass:TPWindowsPropertyWindow.class]);
+    assert(settings.propertyTabs.tabViewType==NSNoTabsNoBorder);
+    BOOL speedTitleFound=NO;
+    for (NSView *view in [settings.propertyTabs tabViewItemAtIndex:0].view.subviews)
+        if ([view isKindOfClass:TPWindowsGroupBox.class] && [((TPWindowsGroupBox *)view).title isEqualToString:@"Pointer speed"])
+            speedTitleFound=YES;
+    assert(speedTitleFound);
+    assert(settings.propertyTabButtons.count==4);
+    for (NSButton *tab in settings.propertyTabButtons) {
+        assert(tab.target==settings && tab.action==@selector(selectPropertyTab:));
+        [tab performClick:nil];
+        assert(settings.propertyTabs.selectedTabViewItem==[settings.propertyTabs tabViewItemAtIndex:tab.tag]);
+    }
+    [settings.propertyTabButtons.firstObject performClick:nil];
+    // Group contents share one coordinate space: no NSBox content-view offset/clipping.
+    assert([[settings.propertyTabs tabViewItemAtIndex:0].label isEqualToString:@"TrackPoint"]);
+    assert([[settings.propertyTabs tabViewItemAtIndex:1].label isEqualToString:@"Keyboard"]);
+    assert([[settings.propertyTabs tabViewItemAtIndex:2].label isEqualToString:@"Permissions"]);
+    NSUInteger groupCount=0;
+    NSMutableArray *pageContents=[NSMutableArray array];
+    for (NSTabViewItem *item in settings.propertyTabs.tabViewItems) {
+        NSView *page=item.view;
+        if ([page isKindOfClass:NSScrollView.class]) page=((NSScrollView *)page).documentView;
+        [pageContents addObject:page];
+        for (NSView *view in page.subviews) {
+            if (![view isKindOfClass:TPWindowsGroupBox.class]) continue;
+            groupCount++;
+            NSRect body=NSMakeRect(0,0,view.bounds.size.width,view.bounds.size.height-8);
+            for (NSView *control in view.subviews)
+                assert(NSContainsRect(NSInsetRect(body,12,8),control.frame));
+        }
+    }
+    assert(groupCount==6);
+    NSArray *supportLabels=((NSView *)pageContents[3]).subviews;
+    assert(supportLabels.count==2);
+    assert(NSMinY(((NSView *)supportLabels[0]).frame)-NSMaxY(((NSView *)supportLabels[1]).frame)==16);
+    for (NSView *label in supportLabels) assert(NSContainsRect(((NSView *)pageContents[3]).bounds,label.frame));
+    assert(settings.scrollSlider.superview.superview==pageContents[0]);
+    assert(settings.blockMiddleCheck.superview==settings.scrollSlider.superview);
+    assert(settings.fnLockCheck.superview.superview==pageContents[1]);
+    assert(settings.f12Summary.superview.superview==pageContents[1]);
+    // Nonselected tab views are not descendants of the live NSTabView hierarchy.
+    // They must receive the theme explicitly rather than retaining native controls.
+    for (NSButton *button in @[settings.fnLockCheck,settings.f18Check,settings.swapCheck,
+            settings.accessibilityBtn,settings.inputMonitoringBtn])
+        assert([button.cell isKindOfClass:TPWindowsButtonCell.class]);
+    assert([settings.scrollSlider.cell isKindOfClass:TPWindowsSliderCell.class]);
+    assert([settings.keyboardStatus.font.fontName containsString:@"Tahoma"]);
+    assert(settings.accessStatus.superview.superview==pageContents[2]);
+    assert(settings.keyboardStatus.superview.superview==pageContents[2]);
+    NSView *deviceGroup=settings.keyboardStatus.superview;
+    NSRect status=[settings.keyboardStatus convertRect:settings.keyboardStatus.bounds toView:deviceGroup];
+    assert(fabs(NSMidY(status)-(deviceGroup.bounds.size.height-8)/2)<.5);
+    assert(settings.accessStatus.superview==settings.accessibilityBtn.superview);
+    assert(NSMidY(settings.accessStatus.frame)==NSMidY(settings.accessibilityBtn.frame));
+    assert(NSMidY(settings.inputStatus.frame)==NSMidY(settings.inputMonitoringBtn.frame));
+    assert(NSMidY(settings.scrollSlider.frame)==NSMidY(settings.scrollLabel.frame));
+    assert(NSMidY(settings.scrollValueLabel.frame)==NSMidY(settings.scrollLabel.frame));
+    // Windows property pages preview changes, Cancel restores the last Apply checkpoint.
+    [settings beginWindowsEditing];
+    int savedSensitivity=s_sensitivity;
+    BOOL savedPreferred=s_preferredScroll;
+    settings.slider.integerValue=savedSensitivity==9 ? 1 : 9;
+    [settings sliderChanged:settings.slider];
+    settings.preferredCheck.state=savedPreferred ? NSControlStateValueOff : NSControlStateValueOn;
+    [settings togglePreferredScroll:settings.preferredCheck];
+    assert(s_sensitivity!=savedSensitivity && s_preferredScroll!=savedPreferred);
+    assert([[TestDefaults standardUserDefaults] integerForKey:PREF_SENSITIVITY]==savedSensitivity);
+    [settings restoreWindowsSettings];
+    assert(s_sensitivity==savedSensitivity && s_preferredScroll==savedPreferred);
+    assert([[TestDefaults standardUserDefaults] integerForKey:PREF_SENSITIVITY]==savedSensitivity);
+    [settings beginWindowsEditing];
+    settings.slider.integerValue=3; [settings sliderChanged:settings.slider];
+    [settings applyWindowsSettings:nil];
+    settings.slider.integerValue=7; [settings sliderChanged:settings.slider];
+    [settings restoreWindowsSettings]; assert(s_sensitivity==3);
+    assert([settings.slider.cell isKindOfClass:TPWindowsSliderCell.class]);
+    assert([settings.preferredCheck.cell isKindOfClass:TPWindowsButtonCell.class]);
+    assert(((TPWindowsButtonCell *)settings.preferredCheck.cell).checkboxStyle);
+    assert(!((TPWindowsButtonCell *)settings.windowsApplyButton.cell).checkboxStyle);
+
 }
 @interface TestPermissionIcon : TPPermissionIcon
 @property (strong) NSArray<NSDraggingItem *> *capturedItems;
@@ -929,6 +1015,11 @@ int main(void) {
         class_addMethod(TPPermissionGuide.class,@selector(isVisible),(IMP)test_guide_visible,"B@:");
         test_permission_guide();
         g_app=[QuietApp new];
+        int previousOpens=openedSettings;
+        assert([g_app applicationShouldHandleReopen:NSApp hasVisibleWindows:NO]);
+        assert(openedSettings==previousOpens+1);
+        assert([g_app applicationShouldHandleReopen:NSApp hasVisibleWindows:YES]);
+        assert(openedSettings==previousOpens+1);
         test_devices_and_settings(); test_hid_input(); test_pointer_and_scroll();
         test_lifecycle(); test_manager_and_tap_lifecycle(); test_actions(); test_update_requests(); test_startup_preferences(); test_upgrade_state(); test_config_report_capability(); test_pointer_sensitivity_display(); test_preferences_and_editor();
         [[TestDefaults standardUserDefaults] removePersistentDomainForName:suite];

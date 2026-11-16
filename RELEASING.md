@@ -70,7 +70,8 @@ use the latest promoted stable formula.
 
 ## Installation identity and limits
 
-Homebrew builds the app from source and signs locally/ad-hoc. It does not run
+Homebrew builds the app from source and automatically creates/reuses a dedicated
+local code-signing identity, unless an explicit identity or fingerprint is configured. It does not run
 `install.sh`, register Login Items, kill the installed app, or change privacy
 permissions. Quit before upgrading and reopen afterward. Add the stable
 `$(brew --prefix trackpointd)/TrackPointD.app` path to Login Items manually.

@@ -7,6 +7,8 @@ app="$1"
 version=$(awk '/^#define TRACKPOINTD_VERSION / {gsub(/"/, "", $3); print $3}' "$source_dir/version.h")
 build=$(awk '/^#define TRACKPOINTD_BUILD / {gsub(/"/, "", $3); print $3}' "$source_dir/version.h")
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$build" =~ ^[0-9]+$ ]] || { echo 'Invalid version.h' >&2; exit 1; }
+source "$source_dir/scripts/signing-identity.sh"
+signing_identity=$(trackpointd_signing_identity)
 complete=false
 trap 'if ! $complete; then rm -rf -- "$app"; fi' EXIT
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -16,6 +18,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 -o "$app/Contents/MacOS/trackpoin
 if [ -f "$source_dir/TrackPointD.icns" ]; then
     cp "$source_dir/TrackPointD.icns" "$app/Contents/Resources/TrackPointD.icns"
 fi
+cp "$source_dir/Resources/keyboard-windows.png" "$source_dir/Resources/f12-windows.png" "$app/Contents/Resources/"
 cp "$source_dir/scripts/upgrade.sh" "$app/Contents/Resources/upgrade.sh"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,6 +39,6 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 "$app/Contents/MacOS/trackpointd" --self-test
-codesign --force --deep --sign "${TRACKPOINTD_SIGN_IDENTITY:--}" "$app"
+codesign --force --deep --sign "$signing_identity" "$app"
 codesign --verify --deep --strict "$app"
 complete=true
