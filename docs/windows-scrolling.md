@@ -34,13 +34,29 @@ simultaneous two-axis vendor payloads do not produce synthetic wheel events.
 
 `scrolling.h` implements these input/batch decisions independently. Each keyboard
 has its own batch; no connected device can contribute another device's count.
-USB starts an 80ms timer on middle-down (or the first wheel report if that
+USB and Bluetooth start an 80ms timer on middle-down (or the first wheel report if that
 edge was unavailable). Horizontal steps are emitted immediately. Releasing the
 button, detaching, pausing or resetting after wake cancels queued work.
 
-Bluetooth already produces OS vertical wheel input, so that event and all its
-scroll fields are left unchanged. The vendor report supplies horizontal steps
-only. Synthesizing vendor vertical data again would double-scroll.
+Bluetooth already produces OS vertical wheel input. For a native event whose
+original HID sender is the exact matched BLE device (or its registry descendant),
+TrackPointD suppresses that event and feeds its unaccelerated HID vertical delta
+into the same 80ms Windows batch. Vendor report vertical data is never fed again.
+Horizontal vendor reports still emit immediate steps and contribute to that
+keyboard's batch count, as on USB. No timestamps or last-active-device guesses
+are used to attribute wheel input.
+
+The original HID sender/delta uses optional system SPI (`CGEventCopyIOHIDEvent`,
+`IOHIDEventGetSenderID`, `IOHIDEventGetFloatValue`), resolved dynamically rather
+than adding a dependency. Apple lists the sender and raw-scroll field signatures
+in [WebKit's IOKit SPI declarations](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/PAL/pal/spi/mac/IOKitSPIMac.h);
+the [HID scroll-report handler](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/IOHIDEventDriver.cpp)
+provides the unaccelerated wheel delta used here. These are not public Apple API contracts. If they are
+unavailable, the sender cannot be resolved, or the raw payload is unsupported,
+the native event passes through without synthetic vertical output for that event.
+This fallback preserves input and prevents duplicate delivery; it does not claim
+Windows batching on an unsupported system. Other mice, trackpads and synthetic
+wheel events with no matching HID source are left unchanged.
 
 Both synthetic paths post standard Quartz **line** events downstream of the HID
 tap. There is no speed slider, `tpScrollSpeed` runtime setting, power acceleration,
@@ -58,13 +74,15 @@ used instead. The original global cross-axis state is not shared across devices.
 
 A Windows notch and a Quartz line are different OS units. Rendering distance,
 OS scroll preferences and application behavior can therefore differ even when
-input deltas and batch decisions agree. BLE's native vertical path is preserved
-rather than replacing the macOS driver with a second synthetic event source.
+input deltas and batch decisions agree. The macOS driver remains in place; only
+identified BLE vertical events are replaced downstream.
 
 ## Verification
 
 `tests/scroll_test.m` exhaustively checks all 256 input byte values, direction,
 batching, cancellation, invalid payloads and numeric bounds. Runtime tests cover
-80ms scheduling, output event units, native BLE event preservation, middle-button
+80ms scheduling, output event units, BLE native replacement without counting its
+vendor report twice, unchanged simultaneous other-mouse input, separate keyboard
+batches, optional-SPI/source failure fallback, all 256 BLE raw byte values, middle-button
 release, detach/wake/pause resets, removal of the speed UI and ignoring old speed
 preferences. Windows-only window-message routing is outside the macOS tests.

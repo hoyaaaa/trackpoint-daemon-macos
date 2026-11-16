@@ -23,6 +23,7 @@
 #import <mach/mach_time.h>
 #import <assert.h>
 #import <float.h>
+#import <dlfcn.h>
 #import "version.h"
 #import "updates.h"
 #import "upgrade.h"
@@ -105,6 +106,21 @@ static bool s_accessibilityRequestAttempted = false;
 - (instancetype)initWithDevice:(IOHIDDeviceRef)hidDevice;
 - (void)resetAfterWake;
 @end
+
+/* These optional system SPI expose the original (unaccelerated) HID wheel and
+ * its registry sender, which public Quartz fields do not identify. No timing
+ * guesses: unavailable SPI or an unknown sender leaves the native event alone. */
+static CFTypeRef (*s_copyHIDWheel)(CGEventRef);
+static uint64_t (*s_HIDWheelSender)(CFTypeRef);
+static double (*s_HIDWheelValue)(CFTypeRef, uint32_t);
+static void load_wheel_source_api(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s_copyHIDWheel=dlsym(RTLD_DEFAULT,"CGEventCopyIOHIDEvent");
+        s_HIDWheelSender=dlsym(RTLD_DEFAULT,"IOHIDEventGetSenderID");
+        s_HIDWheelValue=dlsym(RTLD_DEFAULT,"IOHIDEventGetFloatValue");
+    });
+}
 
 static NSMutableArray<TPHIDDevice *> *s_tpDevices;
 
@@ -316,8 +332,10 @@ static void hid_report(void *context, IOReturn result, void *sender,
                                                  &horizontal, &vertical)) {
         if (horizontal == 0 && vertical == 0) return;
         bool isBLE = device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID;
+        /* BLE vertical is owned by its identified native wheel below. Feeding
+         * the same vendor vertical here would count each report twice. */
         TPWheelBatch nativeBLE={0};
-        int horizontalUnits=tp_wheel_feed(isBLE ? &nativeBLE : &ctx->wheelBatch,
+        int horizontalUnits=tp_wheel_feed(isBLE && vertical ? &nativeBLE : &ctx->wheelBatch,
             (uint8_t)horizontal,(uint8_t)vertical);
         if (horizontalUnits) {
             int sign=s_naturalScroll ? -1 : 1;
@@ -325,7 +343,7 @@ static void hid_report(void *context, IOReturn result, void *sender,
                 2,0,horizontalUnits*sign);
             if (scroll) { CGEventPost(kCGSessionEventTap,scroll); CFRelease(scroll); }
         }
-        if (!isBLE && ctx->wheelBatch.pending) start_wheel_timer(ctx);
+        if (ctx->wheelBatch.pending) start_wheel_timer(ctx);
         ctx->nativeScrolled = true;
         return;
     }
@@ -381,7 +399,8 @@ static void stop_wheel_timer(TPHIDDevice *ctx) {
     ctx->wheelBatch=(TPWheelBatch){0};
 }
 static void start_wheel_timer(TPHIDDevice *ctx) {
-    if (!ctx->device || ctx->wheelTimer || device_number(ctx->device,CFSTR(kIOHIDProductIDKey))!=TP_USB_PID) return;
+    if (!ctx->device || ctx->wheelTimer || (device_number(ctx->device,CFSTR(kIOHIDProductIDKey))!=TP_USB_PID &&
+        device_number(ctx->device,CFSTR(kIOHIDProductIDKey))!=TP_BLE_PID)) return;
     __weak TPHIDDevice *weakContext=ctx;
     ctx->wheelTimer=[NSTimer timerWithTimeInterval:.080 repeats:YES block:^(NSTimer *timer) {
         TPHIDDevice *device=weakContext;
@@ -2197,6 +2216,51 @@ static CGPoint clamp_to_active_display(CGPoint point) {
     return nearest;
 }
 
+/* A sender must be the matched HID device itself or its descendant, never
+ * merely a device with the same VID/PID or a neighbour on the same USB hub. */
+static TPHIDDevice *ble_wheel_device(uint64_t sender) {
+    if (!sender) return nil;
+    io_registry_entry_t entry=IOServiceGetMatchingService(kIOMainPortDefault,
+        IORegistryEntryIDMatching(sender));
+    TPHIDDevice *found=nil;
+    for (int depth=0; entry && depth<16; depth++) {
+        uint64_t registryID=0;
+        if (IORegistryEntryGetRegistryEntryID(entry,&registryID)!=KERN_SUCCESS) break;
+        for (TPHIDDevice *ctx in s_tpDevices) {
+            if (!ctx->device || device_number(ctx->device,CFSTR(kIOHIDVendorIDKey))!=LENOVO_VID ||
+                device_number(ctx->device,CFSTR(kIOHIDProductIDKey))!=TP_BLE_PID) continue;
+            uint64_t deviceID=0;
+            io_service_t service=IOHIDDeviceGetService(ctx->device);
+            if (service && IORegistryEntryGetRegistryEntryID(service,&deviceID)==KERN_SUCCESS &&
+                deviceID && deviceID==registryID) { found=ctx; break; }
+        }
+        if (found) break;
+        io_registry_entry_t parent=0;
+        if (IORegistryEntryGetParentEntry(entry,kIOServicePlane,&parent)!=KERN_SUCCESS) break;
+        IOObjectRelease(entry); entry=parent;
+    }
+    if (entry) IOObjectRelease(entry);
+    return found;
+}
+
+static CGEventRef replace_ble_wheel(CGEventRef event) {
+    if (!s_preferredScroll || !s_copyHIDWheel || !s_HIDWheelSender || !s_HIDWheelValue) return event;
+    CFTypeRef hid=s_copyHIDWheel(event);
+    if (!hid) return event;
+    TPHIDDevice *ctx=ble_wheel_device(s_HIDWheelSender(hid));
+    /* Scroll event type 6, fields X=0 and Y=1. The root HID event retains
+     * firmware deltas before Quartz acceleration/natural-direction changes. */
+    double x=s_HIDWheelValue(hid,(6u<<16)), y=s_HIDWheelValue(hid,(6u<<16)|1);
+    CFRelease(hid);
+    if (!ctx || x!=0 || !isfinite(y) || y==0 || y < -128 || y > 127 || trunc(y)!=y) return event;
+    uint8_t raw=(uint8_t)(int8_t)y;
+    if (!tp_wheel_units(raw)) return event;
+    tp_wheel_feed(&ctx->wheelBatch,0,raw);
+    start_wheel_timer(ctx);
+    ctx->nativeScrolled=true;
+    return NULL; /* Replace, never add to, the native event from this device. */
+}
+
 /* ══════════════════════════════════════════════════════════════
    Unified CGEventTap at kCGHIDEventTap
    Handles: native middle filtering and software sensitivity fallback
@@ -2215,7 +2279,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 
     if (!s_enabled) return event;
 
-    if (type == kCGEventScrollWheel) return event; /* Preserve native BLE/other-device wheels. */
+    if (type == kCGEventScrollWheel) return replace_ble_wheel(event);
 
     /* Consume clicks only after the scrolling state machine has seen the button. */
     bool blockMiddle = s_blockMiddle && tp_count() > 0 &&
@@ -2268,6 +2332,7 @@ static void set_tap_enabled(bool enabled) {
 }
 
 static void try_create_event_tap(void) {
+    load_wheel_source_api();
     if (s_tap) return;
 
     CGEventMask mask =

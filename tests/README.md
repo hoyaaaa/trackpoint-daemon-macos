@@ -11,7 +11,7 @@ frameworks or packages are needed. An assertion or failed command stops the run.
 | HID manager / event tap | Callback registration order, exact device match list, delayed permission setup, tap creation failures, recovery and cleanup | runtime_test.m |
 | Hardware sensitivity / Fn Lock / scrolling settings | Requested commands/values, USB/BLE success/failure, Compact skip, per-device sensitivity fallback, unsupported interface/report-type rejection | runtime_test.m |
 | Modifier / F18 remaps | Every enabled/swap/F18 combination, exact device scoping, Compact exclusion, pause/shutdown clearing | runtime_test.m |
-| Native scrolling | Windows byte policy (all 256 values), 80ms USB batching, natural direction, unchanged BLE vertical wheels, horizontal-only BLE synthesis, release/detach/reset cancellation, malformed/paused/disabled input | runtime_test.m, scroll_test.m |
+| Native scrolling | Windows byte policy (all 256 values), 80ms USB/BLE batching, natural direction, exact HID sender/registry attribution, native BLE replacement without duplication, simultaneous other-mouse preservation, unknown-source/SPI fallback, release/detach/reset cancellation, malformed/paused/disabled input | runtime_test.m, scroll_test.m |
 | Pointer sensitivity | Unknown-origin pass-through, software scaling, hardware bypass, active-display clamping, mixed-device origin classification; real settings-label regressions for USB auxiliary interfaces, true fallback, mixed devices and wake | runtime_test.m, self-test |
 | Middle click / native scroll | Option on/off, native/deferred click, no motion-based wheel synthesis, ordinary mouse buttons, pause/disconnect, Preferred Scrolling off | block_middle_test.m |
 | Input callbacks | X/Y confirmation, standard/vendor middle button, BLE middle reports, hotkey deduplication/release | runtime_test.m |
@@ -43,10 +43,12 @@ frameworks or packages are needed. An assertion or failed command stops the run.
   they do not replace HOME or run the real app, process-kill, Login Item, launchctl
   or hidutil commands. The production scripts themselves are not changed.
 - Asynchronous action blocks run immediately in the runtime test. Scheduling,
-  real callback timing and multi-device attribution are not proven by these tests.
+  real callback timing and physical device attribution are not proven by these tests.
 - Tests use real CoreGraphics event objects. In particular, the BLE regression
-  checks a 10-pixel scroll becomes 20 pixels at 2× and is not scaled a second
-  time. This catches related-field setter interactions rather than mocking them.
+  checks native wheel replacement against raw HID deltas and verifies another
+  mouse's event data stays byte-for-byte unchanged even with an identical
+  timestamp/delta. Fake registry trees cover separate keyboards and a shared hub;
+  vendor/native interleaving and repeated timer ticks must not duplicate output.
 
 ## Still requires manual / physical verification
 

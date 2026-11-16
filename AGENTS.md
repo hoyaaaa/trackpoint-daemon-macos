@@ -55,8 +55,11 @@ hardware evidence.
   fallback only when the HID setting fails.
 - Native middle-down is held. A wheel report marks scrolling; a middle-up with
   no scroll emits one downstream middle click.
-- BLE already emits a standard vertical wheel event. Do not synthesize its raw
-  vertical value again; use the vendor report only for horizontal scrolling.
+- BLE vertical is replaced only when the original HID event sender is a matched
+  Keyboard II BLE device (or its registry descendant). Feed its unaccelerated
+  vertical delta once into the same Windows batch as USB, suppressing that native
+  event. Do not also feed the vendor vertical report. Unknown sources or missing
+  optional system SPI pass through unchanged; never infer wheel origin by time.
 - Synthetic clicks/scrolls go to `kCGSessionEventTap`, downstream of the HID
   tap. Never post them back to `kCGHIDEventTap` and recurse.
 - Unknown event origin must not create TrackPoint wheel events or receive

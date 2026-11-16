@@ -4,6 +4,15 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## Unreleased
+
+### Changed
+- Apply the same Windows vertical wheel decoding and 80ms batching to Bluetooth
+  Keyboard II events whose original HID sender can be identified exactly.
+- Replace the original Bluetooth vertical event instead of adding a second event.
+  Preserve other mice and unknown sources; fall back to native input if optional
+  system APIs are unavailable. Add simultaneous-input and duplicate-scroll tests.
+
 ## 2.7.0 — 2026-11-16
 
 ### Changed
