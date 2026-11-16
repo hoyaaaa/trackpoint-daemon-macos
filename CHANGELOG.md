@@ -7,6 +7,7 @@ Only published, non-prerelease GitHub Releases are offered as updates.
 ## 2.7.1 — 2026-11-17
 
 ### Changed
+- Run CI and release checks on Intel macOS runners to avoid ARM runner capacity failures.
 - Apply the same Windows vertical wheel decoding and 80ms batching to Bluetooth
   Keyboard II events whose original HID sender can be identified exactly.
 - Replace the original Bluetooth vertical event instead of adding a second event.
