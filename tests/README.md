@@ -23,6 +23,9 @@ frameworks or packages are needed. An assertion or failed command stops the run.
 | Installer | Build/self-test/sign/verify failures, verified upgrade/new install, move/open failure rollback, check-only behavior, non-app refusal, Login Item failure/legacy preservation, staging cleanup | installer_test.py |
 | Uninstaller | Existing/missing app, exact two Keyboard II mapping resets, legacy removal, unrelated-file preservation, argument rejection | installer_test.py |
 | Updates / releases / Homebrew | Semantic version comparison, stable-only metadata validation, update errors/timeouts/size limits/reentrancy, formatted in-app headings/lists/inline notes, raw logs, inactive links/images and canonical release URL, installed-path eligibility, upgrade duplicate/quit guards, fixed Homebrew operations and failure/version/signature checks, deterministic archives, version/tag agreement, notes extraction and source checksum | update_test.m, runtime_test.m, release_test.py, homebrew_test.py, formula_test.rb, upgrade_test.py |
+| Automatic signing setup | Real certificate generation with intercepted keychain/signing calls; reuse, locked-keychain/import/sign failures and private temporary-file cleanup | setup_signing_test.py |
+| Windows properties | Original-size custom window, aligned group contents and permission/slider rows, functional tab ownership, theme coverage on initially hidden tabs and dynamic file rows, working tab actions and checkbox/slider cells; preview without persistence, Cancel rollback and Apply checkpoints | runtime_test.m |
+| Local signing selection | Explicit overrides, pinned fingerprint validation, missing config, broken links and no silent ad-hoc fallback on configured errors | signing_test.py |
 | Real bundle build | App build, protocol self-test, Info.plist lint, ad-hoc code signing and signature verification in `--check` mode | install.sh --check |
 
 ## Safety and limits

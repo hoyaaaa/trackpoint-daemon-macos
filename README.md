@@ -43,12 +43,40 @@ Homebrew builds locally and does not register Login Items or grant permissions.
 Use one installation method at a time. Ad-hoc signatures can require privacy
 permission approval again after an upgrade.
 
+### Keep a local signing identity across rebuilds
+
+Homebrew source builds and `install.sh` automatically create a dedicated
+`TrackPointD Local Code Signing` certificate in the login keychain on first use,
+then reuse that certificate and private key on subsequent builds. Homebrew signs
+the installed bundle in `post_install`, outside its isolated compilation step. No paid Apple
+Developer subscription or additional dependency is needed. macOS may ask you to
+unlock the login keychain or approve `/usr/bin/codesign` using the key. This is
+local signing, not Developer ID distribution or notarization.
+
+Existing certificates are never deleted or regenerated automatically. A locked
+keychain, missing private key or signing failure stops installation instead of
+silently switching to ad-hoc signing. Concurrent setup fails safely; retry after
+the other installation finishes. Temporary private-key files are owner-only and
+removed when setup exits. The permanent key remains in the login keychain.
+
+For an existing custom certificate, optionally pin its 40-character SHA-1
+fingerprint in `~/.config/trackpointd/signing-identity` (public fingerprint only).
+`TRACKPOINTD_SIGN_IDENTITY` overrides this file and automatic setup. Tests use
+`TRACKPOINTD_SIGN_IDENTITY=-` to avoid keychain access. No privacy grants are
+reset automatically, and no system-wide certificate trust is added.
+
+The first switch from ad-hoc signing needs one permission registration. Verify
+Accessibility and Input Monitoring survive a second, differently built app on the
+same Mac before relying on continuity. Replacing the certificate/private key or
+changing the app identifier can require approval again. Keep the key in Keychain;
+do not commit or export it into the repository.
+
 ## Version 2 highlights
 
 - Rebuilds the settings window around Lenovo's Windows layout: an
   `External TrackPoint Keyboard` page plus the original F12 `Modify…` flow.
 - Separates macOS permissions and platform-specific extras into a dedicated
-  `macOS Integration` page so they are not presented as Lenovo features.
+  function-based tabs so keyboard, pointer and permission controls are easy to find.
 - Sends the keyboard's real hardware speed setting instead of pretending with
   a made-up acceleration curve.
 - Supports both official transports: USB receiver `17EF:60EE` and Bluetooth LE
@@ -74,25 +102,33 @@ Click the white keyboard icon in the menu bar, then **Settings…**. Its center
 dot is red when connected, orange when attention is required, and dark gray
 when the keyboard is disconnected.
 
-Use **Try 1** and **Try 9** beside Pointer speed for an obvious slow/fast
-comparison. The status below the slider says whether the level was applied to
+Use **Try 1** and **Try 9** at the bottom of **TrackPoint** for an obvious
+slow/fast comparison. The adjacent status says whether the level was applied to
 the keyboard or saved for its next connection. **TrackPointD Enabled** in the
 menu pauses remaps, shortcuts, and scrolling enhancements while leaving basic
 pointer input available. Scroll speed affects both axes on USB and Bluetooth;
 the default position preserves macOS's existing Bluetooth vertical speed.
 
-The first tab follows Lenovo's Windows `Keyboard Properties → External
-TrackPoint Keyboard` page: keyboard graphic, nine-position `Slow`–`Fast`
-slider, Preferred Scrolling, and an F12 action summary with **Modify…**. The
-F12 editor mirrors the Windows mode picker and its files list with Add/Remove,
-URL field, text field, and OK/Cancel flow. Lenovo's proprietary artwork is not
-copied; the keyboard graphic is drawn from a macOS system symbol.
+Settings are grouped by function:
 
-The second tab contains the two required macOS permissions and all macOS-only
-options. When access has not been requested, **Request Access…** invokes
-Apple's native permission API and registers TrackPointD. The matching System
-Settings pane and a draggable app helper open; only the user can approve the
-final switch. After a denial or approval, the button becomes **Open Settings…**.
+- **TrackPoint:** pointer sensitivity, Preferred Scrolling, scroll speed,
+  middle-click blocking, and sensitivity comparison buttons.
+- **Keyboard:** Fn Lock, modifier remaps and the F12 user-defined action.
+- **Permissions:** device status, Accessibility and Input Monitoring.
+- **Supported Models:** model/transport support and experimental-device guidance.
+
+The Windows-style light theme retains the original keyboard/F12 imagery, blue
+title bar and rectangular controls. The F12 editor preserves the Windows mode
+picker, file list, URL/text fields and OK/Cancel flow. Image provenance is in
+`Resources/README.md`. Group headings, content padding and control rows use a
+shared coordinate space without native macOS group-box insets.
+
+The main dialog's OK/Cancel/Apply controls commit or discard sensitivity,
+Preferred Scrolling and F12 edits. Other pointer/keyboard options apply
+immediately. In **Permissions**, **Request Access…** invokes Apple's native
+permission API and opens the corresponding System Settings pane and draggable
+app helper. Only the user can approve the final switch; the button becomes
+**Open Settings…** after the request has been handled.
 
 | Setting | What it does | Origin |
 |---|---|---|
@@ -204,13 +240,10 @@ bash install.sh --check   # build and verify without installing
 bash install.sh
 ```
 
-The installer prefers an available Developer ID Application or Apple
-Development signing identity so macOS recognizes upgrades as the same app and
-keeps privacy approvals. Later upgrades reuse the installed app's signer when
-that identity is still available. If no stable identity is available it falls
-back to ad-hoc signing; macOS may then require both permissions again after an
-upgrade. Set `TRACKPOINTD_SIGN_IDENTITY=-` to force ad-hoc signing, or set it
-to a specific local code-signing identity.
+The installer uses the same automatic local signing setup as Homebrew. Set
+`TRACKPOINTD_SIGN_IDENTITY` to a specific signing identity to override it, or `-`
+for an explicitly ad-hoc build. `--check` builds and verifies without installing;
+it can still create a signing identity unless you explicitly choose `-`.
 
 This script is for building on the Mac that will run the app. A prebuilt app
 for public GitHub Releases must additionally use a Developer ID Application
@@ -222,7 +255,7 @@ The installer builds a separate app, runs its protocol self-test, signs and
 verifies it, and only then replaces the installed copy. A failed upgrade rolls
 back to the previous app.
 
-Grant both permissions. In **Settings → macOS Integration**, click the button
+Grant both permissions. In **Settings → Permissions**, click the button
 beside each permission. A small helper window stays below the macOS settings
 window: drag its TrackPointD icon into the permission list, then turn it on.
 The icon points to the running `.app`, including Homebrew's current version.

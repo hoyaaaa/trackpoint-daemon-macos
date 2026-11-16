@@ -4,6 +4,26 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.6.0 — 2026-11-16
+
+### Changed
+- Group settings into TrackPoint, Keyboard, Permissions and Supported Models
+  tabs; move F12/remaps to Keyboard and scrolling/middle-click controls to TrackPoint.
+- Align macOS integration group titles, body padding and control rows in a
+  shared coordinate space; remove native NSBox insets from the Windows theme.
+- Recreate the Windows Keyboard Properties theme using its original keyboard/F12
+  images, blue title bar, rectangular controls and tabs. Add OK/Cancel/Apply
+  checkpoints and match the F12 editor's original dimensions and field positions.
+
+### Added
+- Automatically create and reuse a dedicated local code-signing certificate in
+  the login keychain for source/Homebrew builds; preserve existing keys and stop
+  on keychain/signing errors without silently falling back to ad-hoc signing.
+- Support a persistent local code-signing certificate pinned by fingerprint in
+  `~/.config/trackpointd/signing-identity`, shared by Homebrew builds and the
+  direct installer. Fail if an explicitly configured identity cannot be used,
+  rather than silently replacing its identity with an ad-hoc signature.
+
 ## 2.5.2 — 2026-11-15
 
 ### Changed

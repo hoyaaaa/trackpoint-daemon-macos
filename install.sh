@@ -22,26 +22,6 @@ BACKUP_APP="$BUILD_ROOT/TrackPointD.previous.app"
 INSTALL_COMPLETE=false
 APP_MOVED=false
 APP_BACKED_UP=false
-SIGNING_IDENTITY="${TRACKPOINTD_SIGN_IDENTITY:-}"
-if [ -z "$SIGNING_IDENTITY" ]; then
-    AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-    EXISTING_AUTHORITY=""
-    if [ -d "$APP" ]; then
-        EXISTING_AUTHORITY="$({ codesign -dv --verbose=4 "$APP" 2>&1 || true; } |
-            awk -F= '/^Authority=/{print substr($0, index($0, "=") + 1); exit}')"
-    fi
-    if [ -n "$EXISTING_AUTHORITY" ] &&
-       [[ "$AVAILABLE_IDENTITIES" == *\"$EXISTING_AUTHORITY\"* ]]; then
-        SIGNING_IDENTITY="$EXISTING_AUTHORITY"
-    else
-        SIGNING_IDENTITY="$(printf '%s\n' "$AVAILABLE_IDENTITIES" | awk '
-        /"Developer ID Application:/ && !developer_id { developer_id=$2 }
-        /"Apple Development:/ && !development { development=$2 }
-        END { if (developer_id) print developer_id; else if (development) print development }
-        ')"
-    fi
-fi
-[ -n "$SIGNING_IDENTITY" ] || SIGNING_IDENTITY="-"
 
 stop_daemon() {
     pkill -x trackpointd 2>/dev/null || true
@@ -68,6 +48,9 @@ cleanup() {
     esac
 }
 trap cleanup EXIT
+
+source "$SCRIPT_DIR/scripts/signing-identity.sh"
+SIGNING_IDENTITY=$(trackpointd_signing_identity)
 
 log() { printf '[+] %s\n' "$1"; }
 

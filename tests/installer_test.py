@@ -67,14 +67,22 @@ def scenario(mode, failure='', existing=True):
             text = text.replace('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
                                 str(fakebin / 'lsregister'))
             (source / name).write_text(text)
+        shutil.copytree(ROOT/'Resources', source/'Resources')
         (source / 'scripts').mkdir()
         shutil.copyfile(ROOT / 'scripts/build-app.sh', source / 'scripts/build-app.sh')
+        shutil.copyfile(ROOT / 'scripts/setup-signing.sh', source / 'scripts/setup-signing.sh')
+        shutil.copyfile(ROOT / 'scripts/signing-identity.sh', source / 'scripts/signing-identity.sh')
         shutil.copyfile(ROOT / 'scripts/upgrade.sh', source / 'scripts/upgrade.sh')
         shutil.copyfile(ROOT / 'version.h', source / 'version.h')
         log = base / 'commands.jsonl'
         env = dict(os.environ, TEST_HOME=str(home), TEST_LOG=str(log), FAIL_STEP=failure,
                    TRACKPOINTD_SIGN_IDENTITY='-', TMPDIR=str(base),
                    PATH=str(fakebin) + os.pathsep + os.environ['PATH'])
+        if failure == 'config':
+            env.pop('TRACKPOINTD_SIGN_IDENTITY', None)
+            config=base/'invalid-signing-identity'
+            config.write_text('not-a-certificate-fingerprint')
+            env['TRACKPOINTD_SIGNING_CONFIG']=str(config)
         script = 'uninstall.sh' if mode == 'uninstall' else 'install.sh'
         args = ['--check'] if mode == 'check' else []
         if mode == 'refuse':
@@ -110,7 +118,7 @@ def scenario(mode, failure='', existing=True):
             else:
                 assert not app.exists(), failure
             assert legacy.exists()
-            if failure in ('build', 'self-test', 'sign', 'verify'):
+            if failure in ('build', 'self-test', 'sign', 'verify', 'config'):
                 assert 'pkill' not in names and 'open' not in names
         else:
             assert result.returncode == 0, result.stderr
@@ -126,7 +134,7 @@ scenario('check')
 scenario('refuse')
 scenario('install')
 scenario('install', existing=False)
-for failure in ('build', 'self-test', 'sign', 'verify', 'move', 'open', 'login'):
+for failure in ('build', 'self-test', 'sign', 'verify', 'config', 'move', 'open', 'login'):
     scenario('install', failure)
 scenario('install', 'open', existing=False)
 scenario('uninstall')
