@@ -4,7 +4,7 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
-## Unreleased
+## 2.7.0 — 2026-11-16
 
 ### Changed
 - Remove the scroll-speed slider and ignore its previously saved value.
