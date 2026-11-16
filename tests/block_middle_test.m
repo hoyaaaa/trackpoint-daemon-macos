@@ -31,7 +31,6 @@ static bool send_event(CGEventType type, bool attributed, int button, CGPoint po
     CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, button);
     assert(event);
     device->rawMiddleDown = attributed && type != kCGEventOtherMouseUp;
-    device->lastMiddleButtonTime = attributed ? mach_absolute_time() : 0;
     device->lastPointerTime = attributed ? mach_absolute_time() : 0;
     bool consumed = unified_callback(NULL, type, event, NULL) == NULL;
     CFRelease(event);
@@ -41,18 +40,12 @@ int main(void) {
     @autoreleasepool {
         CGPoint start = CGPointMake(100,100), moved = CGPointMake(120,130);
         for (int blocked = 0; blocked <= 1; blocked++) {
+            // Movement is never converted to scrolling without native firmware reports.
             prepare(blocked);
-            assert(send_event(kCGEventOtherMouseDown, true, 2, start));
-            assert(s_middleDown);
-            assert(send_event(kCGEventOtherMouseDragged, true, 2, moved));
-            assert(s_hasMoved && scrolls == 1 && clicks == 0);
-            assert(send_event(kCGEventOtherMouseUp, true, 2, moved));
-            assert(!s_middleDown && clicks == 0);
-
-            prepare(blocked);
-            assert(send_event(kCGEventOtherMouseDown, true, 2, start));
-            assert(send_event(kCGEventOtherMouseUp, true, 2, start));
-            assert(clicks == (blocked ? 0 : 2) && scrolls == 0);
+            assert(send_event(kCGEventOtherMouseDown,true,2,start)==blocked);
+            assert(send_event(kCGEventOtherMouseDragged,true,2,moved)==blocked);
+            assert(send_event(kCGEventOtherMouseUp,true,2,moved)==blocked);
+            assert(scrolls==0 && clicks==0);
 
             prepare(blocked);
             native_middle_changed(device, true);
@@ -68,13 +61,11 @@ int main(void) {
             assert(send_event(kCGEventOtherMouseDown, false, 2, start) == blocked);
             assert(send_event(kCGEventOtherMouseDragged, false, 2, moved) == blocked);
             assert(send_event(kCGEventOtherMouseUp, false, 2, moved) == blocked);
-            assert(!s_middleDown);
             assert(!send_event(kCGEventOtherMouseDown, false, 3, start));
 
             prepare(blocked);
             s_preferredScroll = false;
             assert(send_event(kCGEventOtherMouseDown, true, 2, start) == blocked);
-            assert(!s_middleDown);
             prepare(blocked);
             s_enabled = false;
             assert(!send_event(kCGEventOtherMouseDown, true, 2, start));

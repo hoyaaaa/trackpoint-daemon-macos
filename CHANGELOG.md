@@ -4,6 +4,16 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.7.0 — 2026-11-16
+
+### Changed
+- Remove the scroll-speed slider and ignore its previously saved value.
+- Replace custom pixel scaling and pointer-motion acceleration with the observed
+  Windows Preferred Scrolling delta policy: horizontal wheel steps and 80ms USB
+  vertical batching. Keep native Bluetooth vertical wheels unchanged.
+- Cancel pending scroll batches on release, disconnect, pause and wake. Document
+  Windows-specific dispatch differences rather than claiming pixel-identical output.
+
 ## 2.6.2 — 2026-11-16
 
 ### Fixed

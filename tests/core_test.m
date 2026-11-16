@@ -58,9 +58,6 @@ int main(void) {
         s_sensitivity = 9; double fast = sensitivity_factor();
         assert(slow > 0 && slow < 1 && fast > 1);
         assert(fabs(slow * fast - 1) < 1e-9);
-        assert(scaled_scroll_delta(0, 8) == 0);
-        assert(scaled_scroll_delta(5, 2) == 10);
-        assert(scaled_scroll_delta(-5, 2) == -10);
         assert(elapsed_ns(1, 0) == UINT64_MAX);
         assert(elapsed_ns(1, 2) == UINT64_MAX);
 
@@ -68,21 +65,19 @@ int main(void) {
         s_tpDevices = [NSMutableArray arrayWithObject:ctx];
         ctx->inputConfirmed = true;
         ctx->lastPointerTime = mach_absolute_time();
-        ctx->lastMiddleButtonTime = ctx->lastNativeScrollTime = ctx->lastNativeMiddleTime = ctx->lastPointerTime;
+        ctx->lastNativeMiddleTime = ctx->lastPointerTime;
         ctx->rawMiddleDown = ctx->nativeMiddleDown = ctx->nativeScrolled = true;
-        ctx->bleVerticalPending = true;
+        ctx->wheelBatch = (TPWheelBatch){2,3};
         ctx->lastHotkey = 0xB8;
-        s_middleDown = s_hasMoved = true;
-        s_scrollAccumX = 10; s_scrollAccumY = -20;
         reset_gesture_state();
-        assert(!s_middleDown && !s_hasMoved && s_scrollAccumX == 0 && s_scrollAccumY == 0);
+
         assert(!ctx->rawMiddleDown && !ctx->nativeMiddleDown && !ctx->nativeScrolled);
         [ctx resetAfterWake];
-        assert(!ctx->inputConfirmed && !ctx->lastPointerTime && !ctx->lastMiddleButtonTime);
-        assert(!ctx->lastNativeScrollTime && !ctx->lastNativeMiddleTime && !ctx->lastHotkey);
-        assert(!ctx->bleVerticalPending);
+        assert(!ctx->inputConfirmed && !ctx->lastPointerTime);
+        assert(!ctx->lastNativeMiddleTime && !ctx->lastHotkey);
+        assert(!ctx->wheelBatch.pending && !ctx->wheelTimer);
         TPOrigin origin = poll_trackpoint_origin();
-        assert(!origin.fromTrackPoint && !origin.middleButtonDownRecent && !origin.nativeMiddleManaged);
+        assert(!origin.fromTrackPoint && !origin.nativeMiddleManaged);
         puts("core protocol/state tests: ok");
     }
 }
