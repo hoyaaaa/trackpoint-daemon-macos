@@ -10,16 +10,21 @@ class Trackpointd < Formula
   skip_clean "TrackPointD.app"
 
   def install
-    # Homebrew isolates builds from the login keychain. Sign persistently in post_install.
+    # Homebrew also isolates post-install. Sign from the launcher/updater instead.
     system "env", "TRACKPOINTD_SIGN_IDENTITY=-", "bash", "scripts/build-app.sh", buildpath/"TrackPointD.app"
     # The previous stable source archive has no local-signing helpers yet.
     if (buildpath/"scripts/signing-identity.sh").file?
       (libexec/"signing").install "scripts/signing-identity.sh", "scripts/setup-signing.sh"
+      (libexec/"signing").install "scripts/sign-app.sh" if (buildpath/"scripts/sign-app.sh").file?
     end
     prefix.install "TrackPointD.app"
     (bin/"trackpointd").write <<~SH
       #!/bin/bash
+      set -euo pipefail
       if [ "$#" -eq 0 ]; then
+        if [ -f "#{opt_prefix}/libexec/signing/sign-app.sh" ]; then
+          /bin/bash "#{opt_prefix}/libexec/signing/sign-app.sh" "#{opt_prefix}/TrackPointD.app"
+        fi
         exec /usr/bin/open -g "#{opt_prefix}/TrackPointD.app"
       fi
       exec "#{opt_prefix}/TrackPointD.app/Contents/MacOS/trackpointd" "$@"
@@ -27,24 +32,12 @@ class Trackpointd < Formula
     (bin/"trackpointd").chmod 0755
   end
 
-  def post_install
-    return unless (libexec/"signing/signing-identity.sh").file?
-
-    system "bash", "-c", <<~SH, "trackpointd-sign", libexec/"signing/signing-identity.sh", prefix/"TrackPointD.app"
-      set -euo pipefail
-      source "$1"
-      identity=$(trackpointd_signing_identity)
-      codesign --force --deep --sign "$identity" "$2"
-      codesign --verify --deep --strict "$2"
-    SH
-  end
-
   def caveats
     <<~EOS
       Start TrackPointD with: trackpointd
       Grant Accessibility and Input Monitoring permission to TrackPointD.
       Quit TrackPointD before upgrading, then run trackpointd to reopen it.
-      Builds automatically create and reuse a local signing certificate in your login keychain.
+      Run trackpointd once after installing/upgrading to create or reuse local signing.
       macOS may ask you to unlock the keychain or approve codesign on first use.
       Add #{opt_prefix}/TrackPointD.app to Login Items if desired.
       Do not also run a separately installed copy from ~/Applications.

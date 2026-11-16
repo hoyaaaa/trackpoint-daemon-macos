@@ -4,6 +4,14 @@ Version numbers follow MAJOR.MINOR.PATCH. `version.h` defines the app version an
 monotonically increasing bundle build number. A stable release uses tag `vVERSION`.
 Only published, non-prerelease GitHub Releases are offered as updates.
 
+## 2.6.2 — 2026-11-16
+
+### Fixed
+- Sign from the app launcher and updater after Homebrew exits. Homebrew isolates
+  post-install as well as builds, so its hooks cannot use the login keychain.
+- Verify an existing certificate-bound signature before rewriting the app, refuse
+  to re-sign a running daemon, and never launch after a signing failure.
+
 ## 2.6.1 — 2026-11-16
 
 ### Fixed

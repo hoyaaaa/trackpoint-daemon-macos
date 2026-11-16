@@ -18,6 +18,7 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
   (build/"scripts").mkpath
   (prefix/"bin").mkpath
   %w[trackpointd.m version.h updates.h upgrade.h icon.h windows-theme.h TrackPointD.icns].each { |file| (build/file).write((source/file).binread) }
+  (build/"scripts/sign-app.sh").write((source/"scripts/sign-app.sh").read)
   (build/"scripts/setup-signing.sh").write((source/"scripts/setup-signing.sh").read)
   (build/"scripts/signing-identity.sh").write((source/"scripts/signing-identity.sh").read)
   (build/"scripts/upgrade.sh").write((source/"scripts/upgrade.sh").read)
@@ -32,10 +33,10 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
     raise "Homebrew system does not accept an environment Hash" if arguments.any? { |argument| argument.is_a?(Hash) }
     raise "command failed: #{arguments}" unless Kernel.system(*arguments.map(&:to_s))
   end
-  # Before promotion, the old stable archive has no helpers: post_install is inert.
-  formula.post_install
-  Dir.chdir(build) { formula.install; formula.post_install }
-  %w[signing-identity.sh setup-signing.sh].each do |name|
+  raise "signing must not run in a Homebrew post-install hook" if formula.post_install_defined?
+  # Installation never accesses a real keychain, even with no usable login keychain.
+  Dir.chdir(build) { formula.install }
+  %w[signing-identity.sh setup-signing.sh sign-app.sh].each do |name|
     raise "missing installed signing helper" unless (prefix/"libexec/signing"/name).file?
   end
   %w[keyboard-windows.png f12-windows.png].each do |name|
@@ -47,6 +48,19 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
   raise "version mismatch" unless IO.popen([executable.to_s, "--version"], &:read).strip == expected && $?.success?
   raise "self-test failed" unless IO.popen([executable.to_s, "--self-test"], &:read).include?("self-test: ok") && $?.success?
   raise "signature invalid" unless Kernel.system("/usr/bin/codesign", "--verify", "--deep", "--strict", (prefix/"TrackPointD.app").to_s)
+  # Exercise the actual no-argument wrapper with an intercepted signer and opener.
+  calls = root/"launcher-calls"
+  signer = prefix/"libexec/signing/sign-app.sh"
+  signer.write("printf 'sign\\n' >> '#{calls}'\n[ \"${FAIL_SIGN:-}\" != 1 ]\n")
+  opener = root/"open"
+  opener.write("#!/bin/bash\nprintf 'open\\n' >> '#{calls}'\n")
+  opener.chmod 0755
+  executable.write(executable.read.sub("/usr/bin/open", opener.to_s))
+  raise "launcher failed" unless Kernel.system(executable.to_s)
+  raise "launcher order" unless calls.read == "sign\nopen\n"
+  calls.unlink
+  raise "launcher ignored signing failure" if Kernel.system({"FAIL_SIGN" => "1"}, executable.to_s)
+  raise "opened after signing failure" unless calls.read == "sign\n"
   version = IO.popen(["/usr/bin/plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", (prefix/"TrackPointD.app/Contents/Info.plist").to_s], &:read).strip
   raise "bundle version mismatch" unless version == expected
 end

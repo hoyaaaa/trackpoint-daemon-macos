@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-for failure in ('', 'update', 'origin', 'branch', 'dirty', 'status', 'commits', 'promotion', 'upgrade', 'signature', 'version', 'self-test'):
+for failure in ('', 'update', 'origin', 'branch', 'dirty', 'status', 'commits', 'promotion', 'upgrade', 'signing', 'signature', 'version', 'self-test'):
     with tempfile.TemporaryDirectory(prefix='trackpointd-upgrade-test.') as directory:
         root = Path(directory)
         prefix = root / 'brew prefix'
@@ -23,6 +23,9 @@ if command == 'info':
     print(json.dumps({'formulae':[{'versions':{'stable':'2.0.0' if failure=='promotion' else '9.0.0'}}]}))
 sys.exit(1 if failure==command else 0)
 ''')
+        signer=prefix/'opt/trackpointd/libexec/signing/sign-app.sh'
+        signer.parent.mkdir(parents=True)
+        signer.write_text('printf \'["sign-app"]\\n\' >> "$TEST_LOG"\n[ "$FAIL_STEP" != signing ]\n')
         git = root / 'git'
         git.write_text(common + '''command=sys.argv[3]
 if command=='remote': print('https://untrusted.example/tap' if failure=='origin' else 'https://github.com/hoyaaaa/trackpoint-daemon-macos.git')
@@ -54,6 +57,10 @@ sys.exit(1 if failure=='self-test' and sys.argv[1]=='--self-test' else 0)
             assert ['brew', 'upgrade', 'hoyaaaa/trackpointd/trackpointd'] in calls
         else:
             assert not any(row[:2] == ['brew', 'upgrade'] for row in calls)
+        if failure not in ('update','origin','branch','dirty','status','commits','promotion','upgrade'):
+            assert calls.index(['sign-app']) > calls.index(['brew','upgrade','hoyaaaa/trackpointd/trackpointd'])
+        if failure=='signing':
+            assert not any(row[0]=='codesign' for row in calls)
         before = log.read_bytes()
         for version in ('9.0.0;touch /tmp/forbidden', 'v9.0.0', '9.0.0\n', '09.0.0'):
             result = subprocess.run(['/bin/bash', str(script), 'upgrade', str(brew), str(prefix), version],
