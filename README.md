@@ -109,13 +109,13 @@ Use **Try 1** and **Try 9** at the bottom of **TrackPoint** for an obvious
 slow/fast comparison. The adjacent status says whether the level was applied to
 the keyboard or saved for its next connection. **TrackPointD Enabled** in the
 menu pauses remaps, shortcuts, and scrolling enhancements while leaving basic
-pointer input available. Scroll speed affects both axes on USB and Bluetooth;
-the default position preserves macOS's existing Bluetooth vertical speed.
+pointer input available. Scroll speed is controlled by the device/OS wheel policy, without an app-specific
+multiplier. See [Windows scrolling policy](docs/windows-scrolling.md).
 
 Settings are grouped by function:
 
-- **TrackPoint:** pointer sensitivity, Preferred Scrolling, scroll speed,
-  middle-click blocking, and sensitivity comparison buttons.
+- **TrackPoint:** pointer sensitivity, Preferred Scrolling, middle-click blocking,
+  and sensitivity comparison buttons.
 - **Keyboard:** Fn Lock, modifier remaps and the F12 user-defined action.
 - **Permissions:** device status, Accessibility and Input Monitoring.
 - **Supported Models:** model/transport support and experimental-device guidance.
@@ -173,7 +173,7 @@ shows a user-space stack rather than a custom kernel driver:
 | Windows behavior | macOS status |
 |---|---|
 | Hardware pointer speed 1–9 | Implemented over USB and BLE |
-| Preferred vertical/horizontal scrolling | Implemented with native reports plus compatibility fallback |
+| Preferred vertical/horizontal scrolling | Native firmware reports with observed Windows wheel batching |
 | Middle click when no scroll occurred | Implemented with deferred click, matching the Linux state machine |
 | F12 files/apps, URL, text | Implemented; up to four files/apps |
 | Fn+Esc / Fn Lock | Implemented and persisted |
@@ -192,7 +192,7 @@ but the complete Windows experience is not a 100% clone. Windows-only OS
 integrations and Lenovo OSD behavior remain intentionally outside the parity
 claim.
 
-Natural scrolling, modifier swaps, F18, and adjustable scroll speed are useful
+Natural scrolling, modifier swaps and F18 are useful
 macOS additions, not Lenovo Windows features. Press-to-Select is deliberately
 not included: Keyboard II exposes no pressure/Z signal or native command, so
 ordinary pointer movement cannot be distinguished reliably from a press.
@@ -204,8 +204,7 @@ ordinary pointer movement cannot be distinguished reliably from a press.
   - USB receiver: VID `0x17EF`, PID `0x60EE`
   - Bluetooth LE: VID `0x17EF`, PID `0x60E1`
 - ThinkPad Compact Bluetooth Keyboard with TrackPoint (VID `0x17EF`, PID `0x6048`): detected for the
-  menu status and software pointer sensitivity. Scrolling and scroll-speed adjustment require
-  physical-hardware verification. Hardware settings (pointer speed, Fn Lock), F12 and the
+  menu status and software pointer sensitivity. Scrolling requires physical-hardware verification. Hardware settings (pointer speed, Fn Lock), F12 and the
   modifier remaps are not implemented for this model.
 - Xcode Command Line Tools (`xcode-select --install`)
 - Accessibility and Input Monitoring permission for TrackPointD
@@ -326,9 +325,11 @@ Feature `0x04` has no confirmed user-facing function and is left untouched.
 The undocumented Windows initialization command is deliberately not sent.
 
 The native wheel input report ID is `0x16` (22 decimal) on both USB and BLE.
-BLE additionally sends standard vertical-wheel input. TrackPointD scales that
-existing event and synthesizes only the vendor horizontal value, avoiding
-double vertical scrolling.
+BLE additionally sends standard vertical-wheel input, which passes through
+unchanged. TrackPointD synthesizes only the vendor horizontal value, avoiding
+double vertical scrolling. USB vertical input uses the observed Windows 80ms
+batch policy; neither path uses a custom speed multiplier or pointer-motion
+acceleration. See [the evidence and platform boundaries](docs/windows-scrolling.md).
 Hotkey report `0x05` is 2 bytes over USB and 3 bytes over BLE; the BLE-only
 middle-button report `0x15` is 9 bytes. All lengths and embedded IDs are checked
 before a report is used.
@@ -380,7 +381,7 @@ clang -O2 -fobjc-arc -mmacosx-version-min=12.0 \
 
 The middle-click regression test intercepts generated events instead of sending
 mouse input to macOS. It checks scrolling and click suppression with the option
-on/off, native and compatibility click paths, other mouse buttons, pause, and
+on/off, native deferred clicks, absence of motion-based scroll conversion, other mouse buttons, pause, and
 keyboard disconnection:
 
 ```bash

@@ -3,7 +3,7 @@
  *
  * Key remap: per-device hidutil — modifier swap and Right Option -> F18
  * Unified CGEventTap at kCGHIDEventTap:
- *   - Middle button → scroll (with accumulator + threshold)
+ *   - Native middle-button filtering (firmware owns wheel generation)
  *   - Software sensitivity fallback
  * Exact-device HID value callback: pointer-origin confirmation
  * Detection/config: IOHIDManager, exact TrackPoint Keyboard II USB/BLE IDs
@@ -27,11 +27,10 @@
 #import "updates.h"
 #import "upgrade.h"
 #import "icon.h"
+#import "scrolling.h"
 
 /* ── Config ───────────────────────────────────────────────────── */
 #define TP_SENSITIVITY_DEFAULT  5   /* 1-9 scale, 5 = neutral */
-#define SCROLL_SPEED            3.5
-#define SCROLL_THRESHOLD        0.8
 #define LENOVO_VID              0x17EF
 #define TP_USB_PID              0x60EE
 #define TP_BLE_PID              0x60E1
@@ -46,7 +45,6 @@
 #define PREF_SENSITIVITY  @"tpSensitivity"
 #define PREF_F18          @"tpF18Enabled"
 #define PREF_SWAP         @"tpSwapEnabled"
-#define PREF_SCROLL_SPEED @"tpScrollSpeed"
 #define PREF_SCROLL       @"tpPreferredScroll"
 #define PREF_FN_LOCK      @"tpFnLock"
 #define PREF_F12_MODE     @"tpF12Mode"
@@ -60,9 +58,6 @@
 
 static CFMachPortRef     s_tap        = NULL;   /* unified event tap */
 static CFRunLoopSourceRef s_tapSource = NULL;
-static bool              s_middleDown = false;
-static bool              s_hasMoved   = false;
-static CGPoint           s_lastPos    = {0, 0};
 static uint64_t          s_lastMiddleClickTime = 0;
 
 static bool    s_f18Enabled  = true;
@@ -70,12 +65,9 @@ static bool    s_swapEnabled = true;
 static bool    s_enabled     = true;
 static bool    s_blockMiddle = false;  /* swallow the middle-button click (opens links in new tabs) */
 static int     s_sensitivity = TP_SENSITIVITY_DEFAULT;  /* 1-9 */
-static double  s_scrollSpeed = SCROLL_SPEED;
 static bool    s_preferredScroll = true;
 static bool    s_fnLock = false;
 static bool    s_naturalScroll = false;
-static double  s_scrollAccumX = 0.0;
-static double  s_scrollAccumY = 0.0;
 static NSTimer      *s_imTimer = nil;       /* Input Monitoring permission poll timer */
 static IOHIDManagerRef s_hidManager = NULL;
 
@@ -95,7 +87,6 @@ static bool s_accessibilityRequestAttempted = false;
 /* If a fresh ThinkPad HID value was seen within this window, treat the
  * corresponding CG event as coming from that exact device. */
 #define TP_RECENCY_NS  50000000ULL   /* 50ms */
-#define NATIVE_DUP_NS  15000000ULL   /* native report vs. compatibility event */
 
 @interface TPHIDDevice : NSObject {
 @public
@@ -103,9 +94,8 @@ static bool s_accessibilityRequestAttempted = false;
     bool inputConfirmed;
     bool hardwareSensitivityApplied;
     uint64_t lastPointerTime;
-    uint64_t lastMiddleButtonTime;
-    uint64_t lastNativeScrollTime;
-    bool bleVerticalPending;
+    TPWheelBatch wheelBatch;
+    NSTimer *wheelTimer;
     uint64_t lastNativeMiddleTime;
     uint16_t lastHotkey;
     bool nativeMiddleDown;
@@ -168,7 +158,6 @@ static void refresh_ui(void);
 static void apply_key_remap(void);
 static void apply_hardware_settings(void);
 static void reset_gesture_state(void);
-static void reset_compatibility_middle(void);
 static void set_block_middle(bool on);
 static NSURL *validated_http_url(NSString *value);
 static void run_f12_action(void);
@@ -179,6 +168,8 @@ static void handle_hotkey(uint16_t usage);
 static void post_middle_click(CGPoint point);
 static uint64_t elapsed_ns(uint64_t now, uint64_t then);
 static void native_middle_changed(TPHIDDevice *ctx, bool down);
+static void stop_wheel_timer(TPHIDDevice *ctx);
+static void start_wheel_timer(TPHIDDevice *ctx);
 
 typedef struct {
     IOHIDReportType type;
@@ -325,25 +316,17 @@ static void hid_report(void *context, IOReturn result, void *sender,
                                                  &horizontal, &vertical)) {
         if (horizontal == 0 && vertical == 0) return;
         bool isBLE = device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID;
-        int sign = s_naturalScroll ? -1 : 1;
-        int32_t verticalPixels = isBLE ? 0 :
-            (int32_t)lrint((double)vertical * s_scrollSpeed * sign);
-        int32_t horizontalPixels =
-            (int32_t)lrint((double)horizontal * s_scrollSpeed * sign);
-        /* BLE also emits a standard vertical wheel report. Reusing that avoids
-         * double scrolling; the vendor report is still needed for horizontal. */
-        if (verticalPixels != 0 || horizontalPixels != 0) {
-            CGEventRef scroll = CGEventCreateScrollWheelEvent(NULL,
-                kCGScrollEventUnitPixel, 2, verticalPixels, horizontalPixels);
-            if (scroll) {
-                CGEventPost(kCGSessionEventTap, scroll);
-                CFRelease(scroll);
-            }
+        TPWheelBatch nativeBLE={0};
+        int horizontalUnits=tp_wheel_feed(isBLE ? &nativeBLE : &ctx->wheelBatch,
+            (uint8_t)horizontal,(uint8_t)vertical);
+        if (horizontalUnits) {
+            int sign=s_naturalScroll ? -1 : 1;
+            CGEventRef scroll=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitLine,
+                2,0,horizontalUnits*sign);
+            if (scroll) { CGEventPost(kCGSessionEventTap,scroll); CFRelease(scroll); }
         }
-        ctx->lastNativeScrollTime = mach_absolute_time();
-        ctx->bleVerticalPending = isBLE && vertical != 0;
+        if (!isBLE && ctx->wheelBatch.pending) start_wheel_timer(ctx);
         ctx->nativeScrolled = true;
-        s_hasMoved = true;
         return;
     }
 
@@ -382,8 +365,9 @@ static void hid_value(void *context, IOReturn result, void *sender,
     if (!s_enabled) return;
 
     if (page == kHIDPage_Button && usage == 3) {
-        ctx->lastMiddleButtonTime = mach_absolute_time();
         ctx->rawMiddleDown = integerValue != 0;
+        if (s_preferredScroll && ctx->rawMiddleDown) start_wheel_timer(ctx);
+        else if (!ctx->rawMiddleDown) stop_wheel_timer(ctx);
     }
 
     if (page == 0xFFA0 && usage == 0xFB) {
@@ -392,15 +376,38 @@ static void hid_value(void *context, IOReturn result, void *sender,
     }
 }
 
+static void stop_wheel_timer(TPHIDDevice *ctx) {
+    [ctx->wheelTimer invalidate]; ctx->wheelTimer=nil;
+    ctx->wheelBatch=(TPWheelBatch){0};
+}
+static void start_wheel_timer(TPHIDDevice *ctx) {
+    if (!ctx->device || ctx->wheelTimer || device_number(ctx->device,CFSTR(kIOHIDProductIDKey))!=TP_USB_PID) return;
+    __weak TPHIDDevice *weakContext=ctx;
+    ctx->wheelTimer=[NSTimer timerWithTimeInterval:.080 repeats:YES block:^(NSTimer *timer) {
+        TPHIDDevice *device=weakContext;
+        if (!device) { [timer invalidate]; return; }
+        int32_t units=tp_wheel_take(&device->wheelBatch);
+        if (s_enabled && s_preferredScroll && units) {
+            int sign=s_naturalScroll ? -1 : 1;
+            int32_t directed=units==INT32_MIN && sign<0 ? INT32_MAX : units*sign;
+            CGEventRef scroll=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitLine,1,directed);
+            if (scroll) { CGEventPost(kCGSessionEventTap,scroll); CFRelease(scroll); }
+        }
+        if (!device->nativeMiddleDown && !device->rawMiddleDown) stop_wheel_timer(device);
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:ctx->wheelTimer forMode:NSRunLoopCommonModes];
+}
+
 static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     if (down && !ctx->nativeMiddleDown) {
-        /* A CG compatibility event can arrive before this raw report. */
-        reset_compatibility_middle();
         ctx->nativeMiddleDown = true;
         ctx->nativeScrolled = false;
+        stop_wheel_timer(ctx);
+        start_wheel_timer(ctx);
         ctx->lastNativeMiddleTime = mach_absolute_time();
     } else if (!down && ctx->nativeMiddleDown) {
         ctx->nativeMiddleDown = false;
+        stop_wheel_timer(ctx);
         ctx->lastNativeMiddleTime = mach_absolute_time();
         if (!ctx->nativeScrolled && s_preferredScroll) {
             CGEventRef current = CGEventCreate(NULL);
@@ -420,9 +427,7 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
     inputConfirmed = false;
     hardwareSensitivityApplied = false;
     lastPointerTime = 0;
-    lastMiddleButtonTime = 0;
-    lastNativeScrollTime = 0;
-    bleVerticalPending = false;
+    wheelBatch=(TPWheelBatch){0};
     lastNativeMiddleTime = 0;
     lastHotkey = 0;
     nativeMiddleDown = false;
@@ -434,14 +439,13 @@ static void native_middle_changed(TPHIDDevice *ctx, bool down) {
 - (void)resetAfterWake {
     inputConfirmed = false;
     lastPointerTime = 0;
-    lastMiddleButtonTime = 0;
-    lastNativeScrollTime = 0;
-    bleVerticalPending = false;
+    stop_wheel_timer(self);
     lastNativeMiddleTime = 0;
     lastHotkey = 0;
 }
 
 - (void)dealloc {
+    [wheelTimer invalidate];
     if (device) CFRelease(device);
 }
 
@@ -592,9 +596,6 @@ static NSRect permission_guide_frame(NSRect settings, NSRect screen, NSSize size
 @property (strong) NSTextField *applyStatus;
 @property (strong) NSButton    *slowTestButton;
 @property (strong) NSButton    *fastTestButton;
-@property (strong) NSSlider    *scrollSlider;
-@property (strong) NSTextField *scrollLabel;
-@property (strong) NSTextField *scrollValueLabel;
 @property (strong) NSButton    *accessibilityBtn;
 @property (strong) NSButton    *inputMonitoringBtn;
 @property (strong) NSTextField *f12Summary;
@@ -843,26 +844,6 @@ static SettingsWindowController *g_settings = nil;
     extrasBox.title = @"macOS TrackPoint Extras";
     [macView addSubview:extrasBox];
 
-    self.scrollLabel = [NSTextField labelWithString:@"Scroll speed"];
-    self.scrollLabel.font = [NSFont systemFontOfSize:11];
-    self.scrollLabel.frame = NSMakeRect(14, 14, 150, 18);
-    [extrasBox addSubview:self.scrollLabel];
-    self.scrollSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(166, 12, 210, 22)];
-    self.scrollSlider.minValue = 1.0;
-    self.scrollSlider.maxValue = 8.0;
-    self.scrollSlider.doubleValue = s_scrollSpeed;
-    self.scrollSlider.continuous = YES;
-    self.scrollSlider.target = self;
-    self.scrollSlider.action = @selector(scrollSliderChanged:);
-    self.scrollSlider.accessibilityLabel = @"Scroll speed";
-    [extrasBox addSubview:self.scrollSlider];
-    self.scrollValueLabel = [NSTextField labelWithString:
-        [NSString stringWithFormat:@"%.1f", s_scrollSpeed]];
-    self.scrollValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
-    self.scrollValueLabel.alignment = NSTextAlignmentRight;
-    self.scrollValueLabel.frame = NSMakeRect(382, 14, 54, 18);
-    [extrasBox addSubview:self.scrollValueLabel];
-
     NSTabViewItem *supportItem = [[NSTabViewItem alloc] initWithIdentifier:@"support"];
     supportItem.label = @"Supported Models";
     NSView *supportView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 488, 460)];
@@ -918,9 +899,9 @@ static SettingsWindowController *g_settings = nil;
     self.f12DetailValue.frame=NSMakeRect(244,88,194,18); [f12Box addSubview:self.f12DetailValue];
     modifyButton.frame=NSMakeRect(340,34,94,32); [f12Box addSubview:modifyButton];
 
-    extrasBox.frame=NSMakeRect(18,48,452,88);
-    extrasBox.title=@"Scrolling";
-    self.blockMiddleCheck.frame=NSMakeRect(14,44,424,20);
+    extrasBox.frame=NSMakeRect(18,64,452,64);
+    extrasBox.title=@"Middle Button";
+    self.blockMiddleCheck.frame=NSMakeRect(14,18,424,20);
     [extrasBox addSubview:self.blockMiddleCheck];
     [windowsView addSubview:extrasBox];
     [windowsView addSubview:self.applyStatus];
@@ -1098,7 +1079,6 @@ static SettingsWindowController *g_settings = nil;
     self.fnLockCheck.enabled = s_enabled;
     self.f18Check.enabled = s_enabled;
     self.swapCheck.enabled = s_enabled;
-    self.scrollSlider.enabled = s_enabled;
 
     self.slider.integerValue = s_sensitivity;
     self.valueLabel.stringValue = [NSString stringWithFormat:@"%d / 9", s_sensitivity];
@@ -1117,11 +1097,6 @@ static SettingsWindowController *g_settings = nil;
     else
         self.applyStatus.stringValue = [NSString stringWithFormat:
             @"Level %d · software fallback active", s_sensitivity];
-
-    self.scrollSlider.doubleValue = s_scrollSpeed;
-    self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", s_scrollSpeed];
-    self.scrollLabel.stringValue = @"Scroll speed";
-    self.scrollLabel.toolTip = @"Controls vertical and horizontal TrackPoint scrolling.";
 
     [self updateF12Summary];
     self.windowsApplyButton.enabled = self.windowsBaseline &&
@@ -1150,14 +1125,6 @@ static SettingsWindowController *g_settings = nil;
     (void)sender;
     self.slider.integerValue = 9;
     [self sliderChanged:self.slider];
-}
-
-- (void)scrollSliderChanged:(NSSlider *)slider {
-    double val = slider.doubleValue;
-    s_scrollSpeed = val;
-    self.scrollValueLabel.stringValue = [NSString stringWithFormat:@"%.1f", val];
-    [[NSUserDefaults standardUserDefaults] setDouble:val forKey:PREF_SCROLL_SPEED];
-    LOG("scroll speed -> %.1f", val);
 }
 
 - (void)toggleF18:(NSButton *)btn {
@@ -1803,7 +1770,7 @@ static NSImage *status_icon(NSColor *dotColor) {
     self.upgrading=YES;
     BOOL wasEnabled=s_enabled;
     s_enabled=false; // Do not persist this temporary pause.
-    reset_gesture_state(); reset_compatibility_middle();
+    reset_gesture_state();
     TPUpgradeController *controller=[TPUpgradeController new];
     NSString *failure=nil;
     BOOL installed=[controller runForInstallation:installation version:release[@"version"] error:&failure];
@@ -2166,26 +2133,17 @@ static void post_middle_click(CGPoint point) {
 }
 
 static void reset_gesture_state(void) {
-    reset_compatibility_middle();
     for (TPHIDDevice *ctx in s_tpDevices) {
         ctx->nativeMiddleDown = false;
         ctx->nativeScrolled = false;
         ctx->rawMiddleDown = false;
+        stop_wheel_timer(ctx);
     }
-}
-
-static void reset_compatibility_middle(void) {
-    s_middleDown = false;
-    s_hasMoved = false;
-    s_scrollAccumX = 0.0;
-    s_scrollAccumY = 0.0;
 }
 
 typedef struct {
     bool fromTrackPoint;
     bool hardwareSensitivityRecent;
-    bool middleButtonDownRecent;
-    bool nativeScrollRecent;
     bool nativeMiddleActive;
     bool nativeMiddleManaged;
 } TPOrigin;
@@ -2197,24 +2155,6 @@ static uint64_t elapsed_ns(uint64_t now, uint64_t then) {
     return (now - then) * timebase.numer / timebase.denom;
 }
 
-static int64_t scaled_scroll_delta(int64_t value, double factor) {
-    if (value == 0) return 0;
-    int64_t scaled = (int64_t)llround((double)value * factor);
-    return scaled == 0 ? (value < 0 ? -1 : 1) : scaled;
-}
-
-static bool consume_ble_vertical_scroll(void) {
-    uint64_t now = mach_absolute_time();
-    for (TPHIDDevice *ctx in s_tpDevices) {
-        if (!ctx->bleVerticalPending) continue;
-        ctx->bleVerticalPending = false;
-        if (device_number(ctx->device, CFSTR(kIOHIDProductIDKey)) == TP_BLE_PID &&
-            elapsed_ns(now, ctx->lastNativeScrollTime) < NATIVE_DUP_NS)
-            return true;
-    }
-    return false;
-}
-
 static TPOrigin poll_trackpoint_origin(void) {
     TPOrigin origin = {0};
     uint64_t now = mach_absolute_time();
@@ -2224,11 +2164,6 @@ static TPOrigin poll_trackpoint_origin(void) {
             origin.fromTrackPoint = true;
             origin.hardwareSensitivityRecent |= ctx->hardwareSensitivityApplied;
         }
-        if (ctx->rawMiddleDown &&
-            elapsed_ns(now, ctx->lastMiddleButtonTime) < TP_RECENCY_NS)
-            origin.middleButtonDownRecent = true;
-        if (elapsed_ns(now, ctx->lastNativeScrollTime) < NATIVE_DUP_NS)
-            origin.nativeScrollRecent = true;
         if (ctx->nativeMiddleDown) origin.nativeMiddleActive = true;
         if (ctx->nativeMiddleDown ||
             elapsed_ns(now, ctx->lastNativeMiddleTime) < TP_RECENCY_NS)
@@ -2264,7 +2199,7 @@ static CGPoint clamp_to_active_display(CGPoint point) {
 
 /* ══════════════════════════════════════════════════════════════
    Unified CGEventTap at kCGHIDEventTap
-   Handles: Preferred Scrolling fallback and software sensitivity fallback
+   Handles: native middle filtering and software sensitivity fallback
    ══════════════════════════════════════════════════════════════ */
 static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
                                     CGEventRef event, void *refcon) {
@@ -2280,23 +2215,7 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
 
     if (!s_enabled) return event;
 
-    if (type == kCGEventScrollWheel) {
-        if (!s_preferredScroll || !consume_ble_vertical_scroll()) return event;
-        double factor = s_scrollSpeed / SCROLL_SPEED;
-        const CGEventField fields[] = {
-            kCGScrollWheelEventDeltaAxis1,
-            kCGScrollWheelEventFixedPtDeltaAxis1,
-            kCGScrollWheelEventPointDeltaAxis1,
-        };
-        /* CGEvent setters can update related scroll fields. Snapshot before writing. */
-        int64_t values[sizeof(fields) / sizeof(fields[0])];
-        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
-            values[i] = CGEventGetIntegerValueField(event, fields[i]);
-        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
-            CGEventSetIntegerValueField(event, fields[i],
-                                        scaled_scroll_delta(values[i], factor));
-        return event;
-    }
+    if (type == kCGEventScrollWheel) return event; /* Preserve native BLE/other-device wheels. */
 
     /* Consume clicks only after the scrolling state machine has seen the button. */
     bool blockMiddle = s_blockMiddle && tp_count() > 0 &&
@@ -2310,68 +2229,11 @@ static CGEventRef unified_callback(CGEventTapProxy proxy, CGEventType type,
     TPOrigin origin = (isMove || isOtherButton)
         ? poll_trackpoint_origin() : (TPOrigin){0};
 
-    if (isOtherButton) {
-        int button = (int)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
-        if (button == 2 && s_preferredScroll && tp_count() > 0) {
-            /* Native report handling is exact-device and owns this gesture. */
-            if (origin.nativeMiddleManaged) {
-                reset_compatibility_middle();
-                return NULL;
-            }
-
-            if (type == kCGEventOtherMouseDown) {
-                if (!origin.middleButtonDownRecent) return blockMiddle ? NULL : event;
-                s_middleDown = true;
-                s_hasMoved = false;
-                s_lastPos = CGEventGetLocation(event);
-                s_scrollAccumX = 0.0;
-                s_scrollAccumY = 0.0;
-                return NULL;
-            }
-
-            if (s_middleDown) {
-                bool moved = s_hasMoved;
-                CGPoint point = CGEventGetLocation(event);
-                reset_gesture_state();
-                if (!moved) post_middle_click(point);
-                return NULL;
-            }
-        }
-    }
-
-    if (blockMiddle && !s_middleDown) return NULL;
-
-    if (!isMove || tp_count() == 0) return event;
-
-    if (s_middleDown) {
-        /* Once an exact-device middle-down is consumed, own the gesture until
-         * release. Passing an unattributed move would create an orphan drag. */
-        if (!origin.fromTrackPoint) return NULL;
-        if (origin.nativeScrollRecent) return NULL;
-
-        /* Compatibility-mode fallback when native vendor reports are unavailable. */
-        CGPoint point = CGEventGetLocation(event);
-        s_scrollAccumX += point.x - s_lastPos.x;
-        s_scrollAccumY += point.y - s_lastPos.y;
-        s_lastPos = point;
-        double absX = fabs(s_scrollAccumX), absY = fabs(s_scrollAccumY);
-        if (absX > SCROLL_THRESHOLD || absY > SCROLL_THRESHOLD) {
-            s_hasMoved = true;
-            double x = copysign(pow(absX, 1.4) * s_scrollSpeed, s_scrollAccumX);
-            double y = copysign(pow(absY, 1.4) * s_scrollSpeed, s_scrollAccumY);
-            int sign = s_naturalScroll ? -1 : 1;
-            CGEventRef scroll = CGEventCreateScrollWheelEvent(NULL,
-                kCGScrollEventUnitPixel, 2, (int32_t)lrint(y * sign),
-                (int32_t)lrint(x * sign));
-            if (scroll) {
-                CGEventPost(kCGSessionEventTap, scroll);
-                CFRelease(scroll);
-            }
-            s_scrollAccumX = 0.0;
-            s_scrollAccumY = 0.0;
-        }
+    if (isOtherButton && s_preferredScroll && tp_count()>0 &&
+        CGEventGetIntegerValueField(event,kCGMouseEventButtonNumber)==2 && origin.nativeMiddleManaged)
         return NULL;
-    }
+    if (blockMiddle) return NULL;
+    if (!isMove || tp_count()==0) return event;
 
     if (origin.nativeMiddleActive && origin.fromTrackPoint) return NULL;
 
@@ -2463,6 +2325,7 @@ static void hid_removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev)
             return candidate->device == dev;
     }];
     if (index == NSNotFound) return;
+    stop_wheel_timer(s_tpDevices[index]);
     [s_tpDevices removeObjectAtIndex:index];
     reset_gesture_state();
     if (tp_count() > 0) apply_hardware_settings();
@@ -2553,10 +2416,7 @@ static int run_self_test(void) {
     uint8_t middleWithoutID[] = {0, 0x04, 0, 0, 0, 0, 0, 0};
     assert(!decode_middle_report(0x15, middleWithoutID, 8, &middleDown));
 
-    assert(scaled_scroll_delta(7, 1.0) == 7);
-    assert(scaled_scroll_delta(-7, 2.0) == -14);
-    assert(scaled_scroll_delta(1, 0.1) == 1);
-    assert(scaled_scroll_delta(-1, 0.1) == -1);
+
 
     /* Mixed models: only recent hardware-adjusted movement suppresses fallback. */
     s_tpDevices = [NSMutableArray array];
@@ -2591,7 +2451,6 @@ static void load_preferences(void) {
         PREF_SENSITIVITY: @(TP_SENSITIVITY_DEFAULT),
         PREF_F18: @YES,
         PREF_SWAP: @YES,
-        PREF_SCROLL_SPEED: @(SCROLL_SPEED),
         PREF_SCROLL: @YES,
         PREF_FN_LOCK: @NO,
         PREF_F12_MODE: @(TPF12OpenURL),
@@ -2606,7 +2465,6 @@ static void load_preferences(void) {
     s_sensitivity = (int)MAX(1, MIN(9, [ud integerForKey:PREF_SENSITIVITY]));
     s_f18Enabled = [ud boolForKey:PREF_F18];
     s_swapEnabled = [ud boolForKey:PREF_SWAP];
-    s_scrollSpeed = MAX(1.0, MIN(8.0, [ud doubleForKey:PREF_SCROLL_SPEED]));
     s_preferredScroll = [ud boolForKey:PREF_SCROLL];
     s_fnLock = [ud boolForKey:PREF_FN_LOCK];
     s_f12Mode = (TPF12Mode)MAX(TPF12Disabled,
@@ -2637,8 +2495,8 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         load_preferences();
 
-        LOG("prefs: enabled=%s sensitivity=%d scroll=%.1f preferred=%s fnLock=%s f18=%s swap=%s",
-            s_enabled ? "on" : "paused", s_sensitivity, s_scrollSpeed,
+        LOG("prefs: enabled=%s sensitivity=%d preferred=%s fnLock=%s f18=%s swap=%s",
+            s_enabled ? "on" : "paused", s_sensitivity,
             s_preferredScroll ? "on" : "off",
             s_fnLock ? "on" : "off", s_f18Enabled ? "on" : "off",
             s_swapEnabled ? "on" : "off");

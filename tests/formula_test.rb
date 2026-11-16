@@ -17,7 +17,7 @@ Dir.mktmpdir("trackpointd-formula-test.") do |directory|
   %w[keyboard-windows.png f12-windows.png].each { |name| (build/"Resources"/name).write((source/"Resources"/name).binread) }
   (build/"scripts").mkpath
   (prefix/"bin").mkpath
-  %w[trackpointd.m version.h updates.h upgrade.h icon.h windows-theme.h TrackPointD.icns].each { |file| (build/file).write((source/file).binread) }
+  %w[trackpointd.m version.h updates.h upgrade.h icon.h windows-theme.h scrolling.h TrackPointD.icns].each { |file| (build/file).write((source/file).binread) }
   (build/"scripts/sign-app.sh").write((source/"scripts/sign-app.sh").read)
   (build/"scripts/setup-signing.sh").write((source/"scripts/setup-signing.sh").read)
   (build/"scripts/signing-identity.sh").write((source/"scripts/signing-identity.sh").read)

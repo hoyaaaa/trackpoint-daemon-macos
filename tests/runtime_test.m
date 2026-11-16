@@ -55,6 +55,9 @@ static void post(CGEventTapLocation tap, CGEventRef event) {
     [events addObject:@{@"type":@(CGEventGetType(event)),
         @"flags":@(CGEventGetFlags(event)),
         @"key":@(CGEventGetIntegerValueField(event,kCGKeyboardEventKeycode)),
+        @"lineX":@(CGEventGetIntegerValueField(event,kCGScrollWheelEventDeltaAxis2)),
+        @"lineY":@(CGEventGetIntegerValueField(event,kCGScrollWheelEventDeltaAxis1)),
+        @"continuous":@(CGEventGetIntegerValueField(event,kCGScrollWheelEventIsContinuous)),
         @"x":@(CGEventGetIntegerValueField(event,kCGScrollWheelEventPointDeltaAxis2)),
         @"y":@(CGEventGetIntegerValueField(event,kCGScrollWheelEventPointDeltaAxis1)),
         @"text":[NSString stringWithCharacters:text length:length]}];
@@ -330,7 +333,7 @@ static void clear(void) {
     tasks = [NSMutableArray array]; urls = [NSMutableArray array];
     s_tpDevices = [NSMutableArray array];
     s_enabled = s_preferredScroll = trusted = YES;
-    s_naturalScroll = NO; s_scrollSpeed = 3; s_sensitivity = 5;
+    s_naturalScroll = NO; s_sensitivity = 5;
     s_swapEnabled = s_f18Enabled = YES; s_fnLock = s_blockMiddle = NO;
     s_lastMiddleClickTime = 0; failedPID = beeps = 0;
     reset_gesture_state();
@@ -407,17 +410,30 @@ static void test_devices_and_settings(void) {
 static void test_hid_input(void) {
     clear(); TPHIDDevice *usb=make_device(TP_USB_PID), *ble=make_device(TP_BLE_PID);
     [s_tpDevices addObjectsFromArray:@[usb,ble]];
-    uint8_t wheel[]={0x16,2,3};
+    uint8_t wheel[]={0x16,2,0};
     report(usb,0x16,wheel,3);
-    assert(events.count==1 && [events[0][@"x"] intValue]==6 && [events[0][@"y"] intValue]==9);
-    assert(usb->nativeScrolled && !usb->bleVerticalPending);
-    [events removeAllObjects]; s_naturalScroll=YES; report(usb,0x16,wheel,3);
-    assert([events[0][@"x"] intValue]==-6 && [events[0][@"y"] intValue]==-9);
-    [events removeAllObjects]; s_naturalScroll=NO; report(ble,0x16,wheel,3);
-    assert(events.count==1 && [events[0][@"x"] intValue]==6 && [events[0][@"y"] intValue]==0);
-    assert(consume_ble_vertical_scroll() && !consume_ble_vertical_scroll());
-    ble->bleVerticalPending=YES; ble->lastNativeScrollTime=1;
-    assert(!consume_ble_vertical_scroll());
+    assert(events.count==1 && [events[0][@"lineX"] intValue]==1 && [events[0][@"lineY"] intValue]==0);
+    assert(![events[0][@"continuous"] boolValue] && usb->nativeScrolled);
+    [events removeAllObjects]; s_naturalScroll=YES;report(usb,0x16,wheel,3);
+    assert([events[0][@"lineX"] intValue]==-1);
+    [events removeAllObjects];s_naturalScroll=NO;
+    wheel[1]=0;wheel[2]=3;
+    native_middle_changed(usb,true);
+    report(usb,0x16,wheel,3);report(usb,0x16,wheel,3);
+    assert(!events.count && usb->wheelTimer.valid);
+    assert(fabs(usb->wheelTimer.timeInterval-.080)<.00001);
+    [usb->wheelTimer fire];
+    assert(events.count==1 && [events[0][@"lineY"] intValue]==6 && !usb->wheelBatch.pending);
+    [events removeAllObjects];wheel[2]=0xfd;report(usb,0x16,wheel,3);
+    [usb->wheelTimer fire];assert([events[0][@"lineY"] intValue]==-2);
+    [events removeAllObjects];wheel[2]=3;report(usb,0x16,wheel,3);
+    assert(usb->wheelBatch.pending);
+    native_middle_changed(usb,false);
+    assert(!usb->wheelTimer && !usb->wheelBatch.pending && !events.count);
+    wheel[1]=2;wheel[2]=0;report(ble,0x16,wheel,3);
+    assert(events.count==1 && [events[0][@"lineX"] intValue]==1 && !ble->wheelTimer);
+    [events removeAllObjects];wheel[1]=0;wheel[2]=3;report(ble,0x16,wheel,3);
+    assert(!events.count && !ble->wheelTimer);
     [events removeAllObjects]; s_enabled=NO; report(usb,0x16,wheel,3); assert(!events.count);
     s_enabled=YES; s_preferredScroll=NO; report(usb,0x16,wheel,3); assert(!events.count);
     s_preferredScroll=YES;
@@ -459,14 +475,15 @@ static void test_pointer_and_scroll(void) {
     TPHIDDevice *ble=make_device(TP_BLE_PID); [s_tpDevices addObject:ble];
     CGEventRef scroll=CGEventCreateScrollWheelEvent(NULL,kCGScrollEventUnitPixel,1,10);
     assert(scroll); CGEventSetIntegerValueField(scroll,kCGScrollWheelEventPointDeltaAxis1,10);
-    s_scrollSpeed=SCROLL_SPEED*2; ble->bleVerticalPending=YES; ble->lastNativeScrollTime=mach_absolute_time();
-    unified_callback(NULL,kCGEventScrollWheel,scroll,NULL);
-    assert(CGEventGetIntegerValueField(scroll,kCGScrollWheelEventPointDeltaAxis1)==20);
-    unified_callback(NULL,kCGEventScrollWheel,scroll,NULL);
-    assert(CGEventGetIntegerValueField(scroll,kCGScrollWheelEventPointDeltaAxis1)==20); CFRelease(scroll);
-    s_middleDown=YES; s_tap=(CFMachPortRef)1;
+    CGEventRef original=CGEventCreateCopy(scroll);
+    assert(unified_callback(NULL,kCGEventScrollWheel,scroll,NULL)==scroll);
+    const CGEventField fields[]={kCGScrollWheelEventDeltaAxis1,kCGScrollWheelEventFixedPtDeltaAxis1,kCGScrollWheelEventPointDeltaAxis1};
+    for (size_t i=0;i<sizeof(fields)/sizeof(fields[0]);i++)
+        assert(CGEventGetIntegerValueField(scroll,fields[i])==CGEventGetIntegerValueField(original,fields[i]));
+    CFRelease(original); CFRelease(scroll);
+    usb->nativeMiddleDown=YES; s_tap=(CFMachPortRef)1;
     unified_callback(NULL,kCGEventTapDisabledByTimeout,NULL,NULL);
-    assert(!s_middleDown && tapEnabled);
+    assert(!usb->nativeMiddleDown && tapEnabled);
     s_enabled=NO; tapEnabled=NO; unified_callback(NULL,kCGEventTapDisabledByUserInput,NULL,NULL);
     assert(!tapEnabled); s_tap=NULL;
 }
@@ -479,19 +496,27 @@ static void test_lifecycle(void) {
     NSUInteger count=reports.count;
     hid_added(NULL,0,NULL,usb->device); assert(tp_count()==1 && reports.count==count);
     hid_added(NULL,0,NULL,compact->device); assert(tp_count()==2);
+    TPHIDDevice *pausedDevice=s_tpDevices.firstObject;
+    native_middle_changed(pausedDevice,true);pausedDevice->wheelBatch=(TPWheelBatch){2,3};
+    assert(pausedDevice->wheelTimer.valid);
     [g_app toggleEnabled:nil]; assert(!s_enabled && !tapEnabled);
+    assert(!pausedDevice->wheelTimer && !pausedDevice->wheelBatch.pending);
     assert(![[TestDefaults standardUserDefaults] boolForKey:PREF_ENABLED]);
     [g_app toggleEnabled:nil]; assert(s_enabled && tapEnabled);
     assert([[TestDefaults standardUserDefaults] boolForKey:PREF_ENABLED]);
-    s_middleDown=YES;
     TPHIDDevice *connected=s_tpDevices.firstObject;
+    connected->nativeMiddleDown=YES;
     connected->inputConfirmed=YES; connected->lastPointerTime=mach_absolute_time();
     [[TestDefaults standardUserDefaults] setBool:NO forKey:@"com.apple.swipescrolldirection"];
-    [g_app systemDidWake:nil]; assert(!s_middleDown && !connected->inputConfirmed && !s_naturalScroll);
+    [g_app systemDidWake:nil]; assert(!connected->nativeMiddleDown && !connected->inputConfirmed && !s_naturalScroll);
     [[TestDefaults standardUserDefaults] setBool:YES forKey:@"com.apple.swipescrolldirection"];
     [g_app systemDidWake:nil]; assert(s_naturalScroll);
     hid_removed(NULL,0,NULL,unknown->device); assert(tp_count()==2);
+    native_middle_changed(connected,true);
+    connected->wheelBatch=(TPWheelBatch){2,3};
+    assert(connected->wheelTimer.valid);
     hid_removed(NULL,0,NULL,usb->device); assert(tp_count()==1);
+    assert(!connected->wheelTimer && !connected->wheelBatch.pending);
     hid_removed(NULL,0,NULL,compact->device); assert(!tp_count() && !tapEnabled);
     s_tap=NULL;
 }
@@ -597,26 +622,27 @@ static void test_startup_preferences(void) {
     load_preferences();
     assert(s_enabled && !s_blockMiddle && s_sensitivity==TP_SENSITIVITY_DEFAULT);
     assert(s_f18Enabled && s_swapEnabled && s_preferredScroll && !s_fnLock);
-    assert(s_scrollSpeed==SCROLL_SPEED && s_f12Mode==TPF12OpenURL);
+    assert(s_f12Mode==TPF12OpenURL);
+    assert(![defaults objectForKey:@"tpScrollSpeed"]);
     [defaults setInteger:99 forKey:PREF_SENSITIVITY];
-    [defaults setDouble:99 forKey:PREF_SCROLL_SPEED];
+    [defaults setDouble:99 forKey:@"tpScrollSpeed"];
     [defaults setInteger:99 forKey:PREF_F12_MODE];
     [defaults setObject:@[@"/a",@1,@"/b",@"/c",@"/d",@"/e"] forKey:PREF_F12_FILES];
     [defaults setObject:@123 forKey:PREF_F12_URL];
     [defaults setObject:@123 forKey:PREF_F12_TEXT];
     s_f12URL=@"https://example.com/default"; s_f12Text=@"default";
     load_preferences();
-    assert(s_sensitivity==9 && s_scrollSpeed==8 && s_f12Mode==TPF12TypeText);
+    assert(s_sensitivity==9 && s_f12Mode==TPF12TypeText);
     assert(( [s_f12Files isEqual:@[@"/a",@"/b",@"/c",@"/d"]] ));
     assert([s_f12URL isEqual:@"https://example.com/default"] && [s_f12Text isEqual:@"default"]);
     [defaults setInteger:-99 forKey:PREF_SENSITIVITY];
-    [defaults setDouble:-99 forKey:PREF_SCROLL_SPEED];
+    [defaults setDouble:-99 forKey:@"tpScrollSpeed"];
     [defaults setInteger:-99 forKey:PREF_F12_MODE];
     [defaults setBool:NO forKey:PREF_ENABLED]; [defaults setBool:YES forKey:PREF_BLOCK_MIDDLE];
     [defaults setObject:@"https://example.com/saved" forKey:PREF_F12_URL];
     [defaults setObject:@"saved text" forKey:PREF_F12_TEXT];
     load_preferences();
-    assert(s_sensitivity==1 && s_scrollSpeed==1 && s_f12Mode==TPF12Disabled);
+    assert(s_sensitivity==1 && s_f12Mode==TPF12Disabled);
     assert(!s_enabled && s_blockMiddle && [s_f12Text isEqual:@"saved text"]);
     assert([s_f12URL isEqual:@"https://example.com/saved"]);
 }
@@ -723,13 +749,12 @@ static void test_preferences_and_editor(void) {
     button.state=NSControlStateValueOn;
     [settings toggleFnLock:button]; assert(s_fnLock && [[TestDefaults standardUserDefaults] boolForKey:PREF_FN_LOCK]);
     [settings toggleBlockMiddleSetting:button]; assert(s_blockMiddle && [[TestDefaults standardUserDefaults] boolForKey:PREF_BLOCK_MIDDLE]);
-    s_middleDown=YES; button.state=NSControlStateValueOff;
-    [settings togglePreferredScroll:button]; assert(!s_preferredScroll && !s_middleDown);
+    button.state=NSControlStateValueOff;
+    [settings togglePreferredScroll:button]; assert(!s_preferredScroll);
     assert(![[TestDefaults standardUserDefaults] boolForKey:PREF_SCROLL]);
     [settings trySlow:nil]; assert(s_sensitivity==1 && [[TestDefaults standardUserDefaults] integerForKey:PREF_SENSITIVITY]==1);
     [settings tryFast:nil]; assert(s_sensitivity==9 && [[TestDefaults standardUserDefaults] integerForKey:PREF_SENSITIVITY]==9);
-    settings.scrollSlider.doubleValue=4; [settings scrollSliderChanged:settings.scrollSlider];
-    assert(s_scrollSpeed==4 && [[TestDefaults standardUserDefaults] doubleForKey:PREF_SCROLL_SPEED]==4);
+
     [settings buildF12Editor];
     settings.f12DraftMode=TPF12OpenURL; settings.f12DraftURL=@"https://example.com";
     [settings configureF12Controls]; assert(!settings.f12Value.hidden && settings.f12FilesScroll.hidden);
@@ -822,13 +847,18 @@ static void test_preferences_and_editor(void) {
                 assert(NSContainsRect(NSInsetRect(body,12,8),control.frame));
         }
     }
+    NSMutableArray *pendingViews=[pageContents mutableCopy];
+    while (pendingViews.count) {
+        NSView *view=pendingViews.lastObject;[pendingViews removeLastObject];
+        if ([view isKindOfClass:NSSlider.class]) assert(view==settings.slider);
+        [pendingViews addObjectsFromArray:view.subviews];
+    }
     assert(groupCount==6);
     NSArray *supportLabels=((NSView *)pageContents[3]).subviews;
     assert(supportLabels.count==2);
     assert(NSMinY(((NSView *)supportLabels[0]).frame)-NSMaxY(((NSView *)supportLabels[1]).frame)==16);
     for (NSView *label in supportLabels) assert(NSContainsRect(((NSView *)pageContents[3]).bounds,label.frame));
-    assert(settings.scrollSlider.superview.superview==pageContents[0]);
-    assert(settings.blockMiddleCheck.superview==settings.scrollSlider.superview);
+    assert(settings.blockMiddleCheck.superview.superview==pageContents[0]);
     assert(settings.fnLockCheck.superview.superview==pageContents[1]);
     assert(settings.f12Summary.superview.superview==pageContents[1]);
     // Nonselected tab views are not descendants of the live NSTabView hierarchy.
@@ -836,7 +866,6 @@ static void test_preferences_and_editor(void) {
     for (NSButton *button in @[settings.fnLockCheck,settings.f18Check,settings.swapCheck,
             settings.accessibilityBtn,settings.inputMonitoringBtn])
         assert([button.cell isKindOfClass:TPWindowsButtonCell.class]);
-    assert([settings.scrollSlider.cell isKindOfClass:TPWindowsSliderCell.class]);
     assert([settings.keyboardStatus.font.fontName containsString:@"Tahoma"]);
     assert(settings.accessStatus.superview.superview==pageContents[2]);
     assert(settings.keyboardStatus.superview.superview==pageContents[2]);
@@ -846,8 +875,6 @@ static void test_preferences_and_editor(void) {
     assert(settings.accessStatus.superview==settings.accessibilityBtn.superview);
     assert(NSMidY(settings.accessStatus.frame)==NSMidY(settings.accessibilityBtn.frame));
     assert(NSMidY(settings.inputStatus.frame)==NSMidY(settings.inputMonitoringBtn.frame));
-    assert(NSMidY(settings.scrollSlider.frame)==NSMidY(settings.scrollLabel.frame));
-    assert(NSMidY(settings.scrollValueLabel.frame)==NSMidY(settings.scrollLabel.frame));
     // Windows property pages preview changes, Cancel restores the last Apply checkpoint.
     [settings beginWindowsEditing];
     int savedSensitivity=s_sensitivity;

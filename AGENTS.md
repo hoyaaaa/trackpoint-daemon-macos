@@ -28,7 +28,7 @@ IOHIDManager (exact VID/PID)
 
 hidutil --matching → device-only modifier/F18 remaps
 
-one kCGHIDEventTap → compatibility scroll fallback and software speed fallback
+one kCGHIDEventTap → native middle filtering and software speed fallback
 ```
 
 ## Protocol contract
@@ -59,9 +59,9 @@ hardware evidence.
   vertical value again; use the vendor report only for horizontal scrolling.
 - Synthetic clicks/scrolls go to `kCGSessionEventTap`, downstream of the HID
   tap. Never post them back to `kCGHIDEventTap` and recurse.
-- Unknown event origin fails closed. The one exception is an already-consumed,
-  exact-device compatibility middle gesture: swallow unattributed moves until
-  its release rather than leaking an orphan drag to applications.
+- Unknown event origin must not create TrackPoint wheel events or receive
+  software pointer scaling. Do not convert cursor movement into scrolling;
+  firmware wheel reports own Preferred Scrolling.
 - Register manager callbacks before scheduling/opening it. Do not double-open,
   double-schedule, or create a second input queue for a matched device.
 - Resolve a value callback's device through `IOHIDElementGetDevice()`; older
@@ -73,8 +73,9 @@ hardware evidence.
 ## Windows parity boundaries
 
 Real Keyboard II Windows settings are hardware speed, Preferred Scrolling, and
-F12 user action. Fn Lock is firmware. Modifier swaps, F18, natural direction,
-and scroll-speed tuning are macOS additions. Keyboard II exposes no pressure/Z
+F12 user action. Fn Lock is firmware. Modifier swaps, F18 and natural direction are macOS additions. Preferred Scrolling
+uses the observed Windows wheel policy in `scrolling.h`; no speed multiplier or
+pointer-motion-to-scroll fallback is allowed. Keyboard II exposes no pressure/Z
 signal or native Press-to-Select command; do not emulate it from X/Y movement.
 
 ## Build and verify
